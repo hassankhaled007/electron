@@ -53,18 +53,14 @@ export const syncMethods = new Set([
   'showDefinitionForSelection',
   'getZoomFactor',
   'getZoomLevel',
+  'getZoomMode',
   'setZoomFactor',
   'setZoomLevel',
+  'setZoomMode',
   ...navigationHistorySyncMethods
 ]);
 
-export const properties = new Set([
-  'audioMuted',
-  'userAgent',
-  'zoomLevel',
-  'zoomFactor',
-  'frameRate'
-]);
+export const properties = new Set(['audioMuted', 'userAgent', 'zoomLevel', 'zoomFactor', 'zoomMode', 'frameRate']);
 
 export const asyncMethods = new Set([
   'capturePage',
@@ -76,7 +72,6 @@ export const asyncMethods = new Set([
   'send',
   'sendToFrame',
   'sendInputEvent',
-  'setLayoutZoomLevelLimits',
   'setVisualZoomLevelLimits',
   'print',
   'printToPDF'

@@ -3,12 +3,7 @@ import type { BrowserWindow as BWT } from 'electron/main';
 
 const { BrowserWindow } = process._linkedBinding('electron_browser_window') as { BrowserWindow: typeof BWT };
 
-Object.setPrototypeOf(BrowserWindow.prototype, BaseWindow.prototype);
-
 BrowserWindow.prototype._init = function (this: BWT) {
-  // Call parent class's _init.
-  (BaseWindow.prototype as any)._init.call(this);
-
   // Avoid recursive require.
   const { app } = require('electron');
 
@@ -19,15 +14,6 @@ BrowserWindow.prototype._init = function (this: BWT) {
     value: id,
     writable: false
   });
-
-  const nativeSetBounds = this.setBounds;
-  this.setBounds = (bounds, ...opts) => {
-    bounds = {
-      ...this.getBounds(),
-      ...bounds
-    };
-    nativeSetBounds.call(this, bounds, ...opts);
-  };
 
   // Redirect focus/blur event to app instance too.
   this.on('blur', (event: Electron.Event) => {
@@ -40,10 +26,14 @@ BrowserWindow.prototype._init = function (this: BWT) {
   let unresponsiveEvent: NodeJS.Timeout | null = null;
   const emitUnresponsiveEvent = () => {
     unresponsiveEvent = null;
-    if (!this.isDestroyed() && this.isEnabled()) { this.emit('unresponsive'); }
+    if (!this.isDestroyed() && this.isEnabled()) {
+      this.emit('unresponsive');
+    }
   };
   this.webContents.on('unresponsive', () => {
-    if (!unresponsiveEvent) { unresponsiveEvent = setTimeout(emitUnresponsiveEvent, 50); }
+    if (!unresponsiveEvent) {
+      unresponsiveEvent = setTimeout(emitUnresponsiveEvent, 50);
+    }
   });
   this.webContents.on('responsive', () => {
     if (unresponsiveEvent) {
@@ -64,35 +54,19 @@ BrowserWindow.prototype._init = function (this: BWT) {
     unresponsiveEvent = null;
   });
 
-  // Subscribe to visibilityState changes and pass to renderer process.
-  let isVisible = this.isVisible() && !this.isMinimized();
-  const visibilityChanged = () => {
-    const newState = this.isVisible() && !this.isMinimized();
-    if (isVisible !== newState) {
-      isVisible = newState;
-      const visibilityState = isVisible ? 'visible' : 'hidden';
-      this.webContents.emit('-window-visibility-change', visibilityState);
-    }
-  };
-
-  const visibilityEvents = ['show', 'hide', 'minimize', 'maximize', 'restore'];
-  for (const event of visibilityEvents) {
-    this.on(event as any, visibilityChanged);
-  }
-
   this._browserViews = [];
 
   this.on('closed', () => {
-    this._browserViews.forEach(b => b.webContents?.close({ waitForBeforeUnload: true }));
+    this._browserViews.forEach((b) => b.webContents?.close({ waitForBeforeUnload: true }));
   });
 
   // Notify the creation of the window.
-  app.emit('browser-window-created', { preventDefault () {} }, this);
+  app.emit('browser-window-created', { preventDefault() {} }, this);
 
   Object.defineProperty(this, 'devToolsWebContents', {
     enumerable: true,
     configurable: false,
-    get () {
+    get() {
       return this.webContents.devToolsWebContents;
     }
   });
@@ -104,12 +78,14 @@ const isBrowserWindow = (win: any) => {
 
 BrowserWindow.fromId = (id: number) => {
   const win = BaseWindow.fromId(id);
-  return isBrowserWindow(win) ? win as any as BWT : null;
+  return isBrowserWindow(win) ? (win as any as BWT) : null;
 };
 
 BrowserWindow.getAllWindows = () => {
   return BaseWindow.getAllWindows().filter(isBrowserWindow) as any[] as BWT[];
 };
+
+BrowserWindow.clearPersistedState = BaseWindow.clearPersistedState;
 
 BrowserWindow.getFocusedWindow = () => {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -214,10 +190,12 @@ BrowserWindow.prototype.addBrowserView = function (browserView: BrowserView) {
 };
 
 BrowserWindow.prototype.setBrowserView = function (browserView: BrowserView) {
-  this._browserViews.forEach(bv => {
+  this._browserViews.forEach((bv) => {
     this.removeBrowserView(bv);
   });
-  if (browserView) { this.addBrowserView(browserView); }
+  if (browserView) {
+    this.addBrowserView(browserView);
+  }
 };
 
 BrowserWindow.prototype.removeBrowserView = function (browserView: BrowserView) {

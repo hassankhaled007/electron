@@ -64,6 +64,8 @@ class ProxyingURLLoaderFactory
     // For usual requests
     InProgressRequest(
         ProxyingURLLoaderFactory* factory,
+        const mojo::Remote<network::mojom::URLLoaderFactory>
+            override_target_factory,
         uint64_t web_request_id,
         int32_t frame_routing_id,
         int32_t network_service_request_id,
@@ -87,9 +89,7 @@ class ProxyingURLLoaderFactory
 
     // network::mojom::URLLoader:
     void FollowRedirect(
-        const std::vector<std::string>& removed_headers,
-        const net::HttpRequestHeaders& modified_headers,
-        const net::HttpRequestHeaders& modified_cors_exempt_headers,
+        network::HttpRequestHeadersUpdateParams headers_update_params,
         const std::optional<GURL>& new_url) override;
     void SetPriority(net::RequestPriority priority,
                      int32_t intra_priority_value) override;
@@ -111,9 +111,12 @@ class ProxyingURLLoaderFactory
 
     void OnLoaderCreated(
         mojo::PendingReceiver<network::mojom::TrustedHeaderClient> receiver);
+    void OnLoaderFailedWithRemoteEndpoint(
+        const net::IPEndPoint& remote_endpoint);
 
     // network::mojom::TrustedHeaderClient:
-    void OnBeforeSendHeaders(const net::HttpRequestHeaders& headers,
+    void OnBeforeSendHeaders(const GURL& request_url,
+                             const net::HttpRequestHeaders& headers,
                              OnBeforeSendHeadersCallback callback) override;
     void OnHeadersReceived(const std::string& headers,
                            const net::IPEndPoint& endpoint,
@@ -140,6 +143,8 @@ class ProxyingURLLoaderFactory
     void HandleBeforeRequestRedirect();
 
     raw_ptr<ProxyingURLLoaderFactory> const factory_;
+    const mojo::Remote<network::mojom::URLLoaderFactory>
+        override_target_factory_;
     network::ResourceRequest request_;
     const std::optional<url::Origin> original_initiator_;
     const uint64_t request_id_ = 0;
@@ -160,6 +165,7 @@ class ProxyingURLLoaderFactory
     mojo::ScopedDataPipeConsumerHandle current_body_;
     scoped_refptr<net::HttpResponseHeaders> override_headers_;
     GURL redirect_url_;
+    int redirect_count_ = 0;
 
     const bool for_cors_preflight_ = false;
 
@@ -202,6 +208,7 @@ class ProxyingURLLoaderFactory
   ProxyingURLLoaderFactory(
       api::WebRequest* web_request,
       const HandlersMap& intercepted_handlers,
+      base::WeakPtr<ElectronBrowserContext> browser_context,
       int render_process_id,
       int frame_routing_id,
       uint64_t* request_id_generator,
@@ -241,6 +248,9 @@ class ProxyingURLLoaderFactory
       const network::ResourceRequest& request,
       mojo::PendingReceiver<network::mojom::TrustedHeaderClient> receiver)
       override;
+  void OnLoaderFailedWithRemoteEndpoint(
+      int32_t request_id,
+      const net::IPEndPoint& remote_endpoint) override;
 
   bool IsForServiceWorkerScript() const;
 
@@ -261,11 +271,15 @@ class ProxyingURLLoaderFactory
   // reference is guaranteed to be valid.
   //
   // In this way we can avoid using code from api namespace in this file.
-  const raw_ref<const HandlersMap> intercepted_handlers_;
+  const raw_ref<const HandlersMap, LeakedDanglingUntriaged>
+      intercepted_handlers_;
+
+  const base::WeakPtr<ElectronBrowserContext> browser_context_;
 
   const int render_process_id_;
   const int frame_routing_id_;
-  raw_ptr<uint64_t> request_id_generator_;  // managed by ElectronBrowserClient
+  raw_ptr<uint64_t, LeakedDanglingUntriaged>
+      request_id_generator_;  // managed by ElectronBrowserClient
   std::unique_ptr<extensions::ExtensionNavigationUIData> navigation_ui_data_;
   std::optional<int64_t> navigation_id_;
   mojo::ReceiverSet<network::mojom::URLLoaderFactory> proxy_receivers_;

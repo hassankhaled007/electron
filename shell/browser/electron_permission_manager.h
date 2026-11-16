@@ -46,7 +46,7 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
   using StatusCallback = base::OnceCallback<void(content::PermissionResult)>;
   using StatusesCallback =
       base::OnceCallback<void(const std::vector<content::PermissionResult>&)>;
-  using PairCallback = base::OnceCallback<void(base::Value::Dict)>;
+  using PairCallback = base::OnceCallback<void(base::DictValue)>;
   using RequestHandler = base::RepeatingCallback<void(content::WebContents*,
                                                       blink::PermissionType,
                                                       StatusCallback,
@@ -71,9 +71,8 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
   void RequestPermissionWithDetails(
       blink::mojom::PermissionDescriptorPtr permission,
       content::RenderFrameHost* render_frame_host,
-      const GURL& requesting_origin,
       bool user_gesture,
-      base::Value::Dict details,
+      base::DictValue details,
       StatusCallback response_callback);
 
   // Handler to dispatch permission requests in JS.
@@ -83,8 +82,9 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
   void SetProtectedUSBHandler(const ProtectedUSBHandler& handler);
   void SetBluetoothPairingHandler(const BluetoothPairingHandler& handler);
 
-  bool HasPermissionRequestHandler() const;
   bool HasPermissionCheckHandler() const;
+
+  void CancelPendingRequests(content::WebContents* web_contents);
 
   void CheckBluetoothDevicePair(gin_helper::Dictionary details,
                                 PairCallback pair_callback) const;
@@ -92,7 +92,7 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
   bool CheckPermissionWithDetails(blink::PermissionType permission,
                                   content::RenderFrameHost* render_frame_host,
                                   const GURL& requesting_origin,
-                                  base::Value::Dict details) const;
+                                  base::DictValue details) const;
 
   bool CheckDevicePermission(blink::PermissionType permission,
                              const url::Origin& origin,
@@ -118,10 +118,6 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
                             content::PermissionResult result);
 
   // content::PermissionControllerDelegate:
-  void RequestPermissions(
-      content::RenderFrameHost* render_frame_host,
-      const content::PermissionRequestDescription& request_description,
-      StatusesCallback callback) override;
   void ResetPermission(blink::PermissionType permission,
                        const GURL& requesting_origin,
                        const GURL& embedding_origin) override;
@@ -146,10 +142,6 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
       const blink::mojom::PermissionDescriptorPtr& permission_descriptor,
       content::RenderProcessHost* render_process_host,
       const GURL& worker_origin) override;
-  content::PermissionResult GetPermissionResultForEmbeddedRequester(
-      const blink::mojom::PermissionDescriptorPtr& permission_descriptor,
-      content::RenderFrameHost* render_frame_host,
-      const url::Origin& requesting_origin) override;
 
  private:
   class PendingRequest;
@@ -158,7 +150,7 @@ class ElectronPermissionManager : public content::PermissionControllerDelegate {
   void RequestPermissionsWithDetails(
       content::RenderFrameHost* render_frame_host,
       const content::PermissionRequestDescription& request_description,
-      base::Value::Dict details,
+      base::DictValue details,
       StatusesCallback callback);
 
   RequestHandler request_handler_;

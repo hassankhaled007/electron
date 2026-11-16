@@ -6,7 +6,7 @@ This is not a comprehensive end-all guide to creating an Electron Browser API, r
 
 ## Add your files to Electron's project configuration
 
-Electron uses [GN](https://gn.googlesource.com/gn) as a meta build system to generate files for its compiler, [Ninja](https://ninja-build.org/). This means that in order to tell Electron to compile your code, we have to add your API's code and header file names into [`filenames.gni`](https://github.com/electron/electron/blob/main/filenames.gni).
+Electron uses [GN](https://gn.googlesource.com/gn) as a meta build system to generate files for its compiler, [Ninja](https://ninja-build.org/). This means that in order to tell Electron to compile your code, we have to add your API's code and header file names into [`filenames.gni`](../../filenames.gni).
 
 You will need to append your API file names alphabetically into the appropriate files like so:
 
@@ -53,63 +53,86 @@ In your `api_name.h` file:
 #ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_{API_NAME}_H_
 #define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_{API_NAME}_H_
 
-#include "gin/handle.h"
 #include "gin/wrappable.h"
 
 namespace electron {
 
 namespace api {
 
-class ApiName : public gin::DeprecatedWrappable<ApiName>  {
+class ApiName final : public gin::Wrappable<ApiName> {
  public:
-  static gin::Handle<ApiName> Create(v8::Isolate* isolate);
+  static ApiName* Create(v8::Isolate* isolate);
 
   // gin::Wrappable
-  static gin::DeprecatedWrapperInfo kWrapperInfo;
+  static const gin::WrapperInfo kWrapperInfo;
+  void Trace(cppgc::Visitor* visitor) const override;
+  const gin::WrapperInfo* wrapper_info() const override;
   gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
       v8::Isolate* isolate) override;
-  const char* GetTypeName() override;
-} // namespace api
-} // namespace electron
+  const char* GetHumanReadableName() const override;
+
+  // Public for cppgc::MakeGarbageCollected.
+  ApiName();
+  ~ApiName() override;
+
+  void MethodName();
+};
+
+}  // namespace api
+}  // namespace electron
 ```
 
 In your `api_name.cc` file:
 
 ```cpp title='api_name.cc'
-#include "shell/browser/api/electron_api_safe_storage.h"
+#include "shell/browser/api/electron_api_api_name.h"
 
-#include "shell/browser/browser.h"
-#include "shell/common/gin_converters/base_converter.h"
-#include "shell/common/gin_converters/callback_converter.h"
+#include "gin/object_template_builder.h"
 #include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/gin_helper/object_template_builder.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
-#include "shell/common/platform_util.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
 
 namespace electron {
 
 namespace api {
 
-gin::DeprecatedWrapperInfo ApiName::kWrapperInfo = {gin::kEmbedderNativeGin};
+const gin::WrapperInfo ApiName::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronApiName);
+
+ApiName::ApiName() = default;
+ApiName::~ApiName() = default;
+
+// static
+ApiName* ApiName::Create(v8::Isolate* isolate) {
+  return cppgc::MakeGarbageCollected<ApiName>(
+      isolate->GetCppHeap()->GetAllocationHandle());
+}
+
+void ApiName::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<ApiName>::Trace(visitor);
+}
+
+const gin::WrapperInfo* ApiName::wrapper_info() const {
+  return &kWrapperInfo;
+}
 
 gin::ObjectTemplateBuilder ApiName::GetObjectTemplateBuilder(
     v8::Isolate* isolate) {
-  return gin::ObjectTemplateBuilder(isolate)
-      .SetMethod("methodName", &ApiName::methodName);
+  return gin::Wrappable<ApiName>::GetObjectTemplateBuilder(isolate)
+      .SetMethod("methodName", &ApiName::MethodName);
 }
 
-const char* ApiName::GetTypeName() {
-  return "ApiName";
+const char* ApiName::GetHumanReadableName() const {
+  return "Electron / ApiName";
 }
 
-// static
-gin::Handle<ApiName> ApiName::Create(v8::Isolate* isolate) {
-  return gin::CreateHandle(isolate, new ApiName());
-}
+void ApiName::MethodName() {}
 
-} // namespace api
+}  // namespace api
 
-} // namespace electron
+}  // namespace electron
 
 namespace {
 
@@ -125,13 +148,17 @@ void Initialize(v8::Local<v8::Object> exports,
 }  // namespace
 ```
 
+Add a unique `kElectronApiName` value to
+[`shell/common/gin_helper/wrappable_pointer_tags.h`](../../shell/common/gin_helper/wrappable_pointer_tags.h)
+for the API's `gin::WrapperInfo`.
+
 ## Link your Electron API with Node
 
-In the [`typings/internal-ambient.d.ts`](https://github.com/electron/electron/blob/main/typings/internal-ambient.d.ts) file, we need to append a new property onto the `Process` interface like so:
+In the [`typings/internal-ambient.d.ts`](../../typings/internal-ambient.d.ts) file, we need to append a new property onto the `Process` interface like so:
 
-```ts title='typings/internal-ambient.d.ts' @ts-nocheck
+```ts title='typings/internal-ambient.d.ts' @ts-nocheck @noformat
 interface Process {
-    _linkedBinding(name: 'electron_browser_{api_name}'): Electron.ApiName;
+  _linkedBinding(name: 'electron_browser_{api_name}'): Electron.ApiName;
 }
 ```
 
@@ -141,7 +168,7 @@ At the very bottom of your `api_name.cc` file:
 NODE_LINKED_BINDING_CONTEXT_AWARE(electron_browser_{api_name},Initialize)
 ```
 
-In your [`shell/common/node_bindings.cc`](https://github.com/electron/electron/blob/main/shell/common/node_bindings.cc) file, add your node binding name to Electron's built-in modules.
+In your [`shell/common/node_bindings.cc`](../../shell/common/node_bindings.cc) file, add your node binding name to Electron's built-in modules.
 
 ```cpp title='shell/common/node_bindings.cc'
 #define ELECTRON_BROWSER_MODULES(V)      \
@@ -159,15 +186,13 @@ We will need to create a new TypeScript file in the path that follows:
 
 `"lib/browser/api/{electron_browser_{api_name}}.ts"`
 
-An example of the contents of this file can be found [here](https://github.com/electron/electron/blob/main/lib/browser/api/native-theme.ts).
+An example of the contents of this file can be found [here](../../lib/browser/api/native-theme.ts).
 
 ### Expose your module to TypeScript
 
 Add your module to the module list found at `"lib/browser/api/module-list.ts"` like so:
 
-<!-- eslint-disable semi -->
-
-```ts title='lib/browser/api/module-list.ts' @ts-nocheck
+```ts title='lib/browser/api/module-list.ts' @ts-nocheck @noformat
 export const browserModuleList: ElectronInternal.ModuleEntry[] = [
   { name: 'apiName', loader: () => require('./api-name') }
 ];

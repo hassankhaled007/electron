@@ -6,10 +6,10 @@ Subject: feat: add support for embedder snapshot validation
 IsValid is not exposed despite being commented as for embedders, this exposes something that works for us.
 
 diff --git a/gin/v8_initializer.cc b/gin/v8_initializer.cc
-index d7fedf4e8b1ff5c6168b49990d67a1ab09b1800e..05ba0cc17e8ea085b604827e2d0507a93a1a53e5 100644
+index cdbf8e04fb7d9bcc885419cf96c2948694681b28..3d7b968a0c997817bf33e00ad1c079ef302b49c5 100644
 --- a/gin/v8_initializer.cc
 +++ b/gin/v8_initializer.cc
-@@ -76,11 +76,23 @@ bool GenerateEntropy(unsigned char* buffer, size_t amount) {
+@@ -103,11 +103,23 @@ bool GenerateEntropy(unsigned char* buffer, size_t amount) {
    return true;
  }
  
@@ -27,13 +27,13 @@ index d7fedf4e8b1ff5c6168b49990d67a1ab09b1800e..05ba0cc17e8ea085b604827e2d0507a9
  void GetMappedFileData(base::MemoryMappedFile* mapped_file,
                         v8::StartupData* data) {
    if (mapped_file) {
-     data->data = reinterpret_cast<const char*>(mapped_file->data());
-     data->raw_size = static_cast<int>(mapped_file->length());
+     data->data = reinterpret_cast<const char*>(mapped_file->bytes().data());
+     data->raw_size = static_cast<int>(mapped_file->bytes().size());
 +    SnapshotValidator().Run(data);
    } else {
      data->data = nullptr;
      data->raw_size = 0;
-@@ -225,6 +237,10 @@ constexpr std::string_view kV8FlagParam = "V8FlagParam";
+@@ -273,6 +285,10 @@ constexpr std::string_view kV8FlagParam = "V8FlagParam";
  
  }  // namespace
  
@@ -45,18 +45,18 @@ index d7fedf4e8b1ff5c6168b49990d67a1ab09b1800e..05ba0cc17e8ea085b604827e2d0507a9
   public:
    void Visit(const std::string& feature_name,
 diff --git a/gin/v8_initializer.h b/gin/v8_initializer.h
-index 6f7382cd600cd34916d9382878aee4b469dae5d0..61ed0f46437d2e1abbcebcfb64df06d17c8d9139 100644
+index c880e5bec57882df2317e7a61108755b3377f173..810a6a29b85791968ab8a037b438895e7d9e235b 100644
 --- a/gin/v8_initializer.h
 +++ b/gin/v8_initializer.h
-@@ -11,6 +11,7 @@
- 
+@@ -10,6 +10,7 @@
  #include "base/files/file.h"
+ #include "base/files/file_path.h"
  #include "base/files/memory_mapped_file.h"
 +#include "base/functional/callback.h"
  #include "build/build_config.h"
  #include "gin/array_buffer.h"
  #include "gin/gin_export.h"
-@@ -28,6 +29,8 @@ class StartupData;
+@@ -27,6 +28,8 @@ class StartupData;
  
  namespace gin {
  

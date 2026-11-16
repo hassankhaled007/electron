@@ -9,42 +9,55 @@
 #include <vector>
 
 #include "base/containers/flat_map.h"
+#include "base/memory/raw_ptr.h"
 #include "base/strings/utf_string_conversions.h"
-#include "base/threading/thread_restrictions.h"
+#include "base/task/sequenced_task_runner.h"
+#include "base/time/time.h"
 #include "chrome/browser/media/webrtc/desktop_capturer_wrapper.h"
 #include "chrome/browser/media/webrtc/desktop_media_list.h"
+#include "chrome/browser/media/webrtc/desktop_media_list_observer.h"
+#include "chrome/browser/media/webrtc/native_desktop_media_list.h"
 #include "chrome/browser/media/webrtc/thumbnail_capturer_mac.h"
 #include "chrome/browser/media/webrtc/window_icon_util.h"
-#include "content/public/browser/browser_thread.h"
 #include "content/public/browser/desktop_capture.h"
+#include "content/public/browser/desktop_media_id.h"
 #include "gin/object_template_builder.h"
+#include "gin/persistent.h"
 #include "shell/browser/javascript_environment.h"
 #include "shell/common/api/electron_api_native_image.h"
 #include "shell/common/gin_converters/gfx_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/event_emitter_caller.h"
 #include "shell/common/gin_helper/handle.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capture_options.h"
 #include "third_party/webrtc/modules/desktop_capture/desktop_capturer.h"
 #include "ui/base/ozone_buildflags.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
 
 #if BUILDFLAG(IS_WIN)
 #include "third_party/webrtc/modules/desktop_capture/win/dxgi_duplicator_controller.h"
 #include "third_party/webrtc/modules/desktop_capture/win/screen_capturer_win_directx.h"
 #include "ui/display/win/display_info.h"
-#elif BUILDFLAG(IS_OZONE_X11)
+#elif BUILDFLAG(SUPPORTS_OZONE_X11)
 #include "base/logging.h"
 #include "ui/base/x/x11_display_util.h"
 #include "ui/base/x/x11_util.h"
 #include "ui/display/util/edid_parser.h"  // nogncheck
-#include "ui/gfx/x/atom_cache.h"
+#include "ui/gfx/x/connection.h"
 #include "ui/gfx/x/randr.h"
 #endif
 
 #if BUILDFLAG(IS_MAC)
 #include "base/strings/string_number_conversions.h"
 #include "ui/base/cocoa/permissions_utils.h"
+#endif
+
+#if defined(WEBRTC_USE_PIPEWIRE)
+#include "third_party/webrtc/modules/desktop_capture/linux/wayland/restore_token_manager.h"
+#include "third_party/webrtc/modules/portal/screencast_persist_mode.h"
 #endif
 
 namespace {
@@ -72,7 +85,7 @@ std::vector<uint8_t> GetEDIDProperty(x11::RandR* randr,
   constexpr const char kRandrEdidProperty[] = "EDID";
   auto future = randr->GetOutputProperty(x11::RandR::GetOutputPropertyRequest{
       .output = output,
-      .property = x11::GetAtom(kRandrEdidProperty),
+      .property = x11::Connection::Get()->GetAtom(kRandrEdidProperty),
       .long_length = 128});
   auto response = future.Sync();
   std::vector<uint8_t> edid;
@@ -144,35 +157,61 @@ base::flat_map<int32_t, uint32_t> MonitorAtomIdToDisplayId() {
 }
 #endif
 
-std::unique_ptr<ThumbnailCapturer> MakeWindowCapturer() {
-#if BUILDFLAG(IS_MAC)
-  if (ShouldUseThumbnailCapturerMac(DesktopMediaList::Type::kWindow)) {
-    return CreateThumbnailCapturerMac(DesktopMediaList::Type::kWindow);
+// A PipeWire capturer's portal session asks for `persistent` and tries
+// `restore_token`; the issued token is kept under the capturer's source id.
+std::unique_ptr<ThumbnailCapturer> WrapCapturer(
+    std::unique_ptr<webrtc::DesktopCapturer> capturer,
+    bool persistent,
+    const std::string& restore_token) {
+  if (!capturer)
+    return nullptr;
+#if defined(WEBRTC_USE_PIPEWIRE)
+  webrtc::DesktopCapturer::SourceList sources;
+  if (capturer->GetDelegatedSourceListController() &&
+      capturer->GetSourceList(&sources) && sources.size() == 1) {
+    if (persistent || !restore_token.empty()) {
+      webrtc::RestoreTokenManager::GetInstance().AddToken(
+          sources[0].id, restore_token,
+          persistent ? webrtc::xdg_portal::ScreenCastPersistMode::kPersistent
+                     : webrtc::xdg_portal::ScreenCastPersistMode::kTransient);
+    }
+    capturer->SelectSource(sources[0].id);
   }
-#endif  // BUILDFLAG(IS_MAC)
-
-  std::unique_ptr<webrtc::DesktopCapturer> window_capturer =
-      content::desktop_capture::CreateWindowCapturer(
-          content::desktop_capture::CreateDesktopCaptureOptions());
-  return window_capturer ? std::make_unique<DesktopCapturerWrapper>(
-                               std::move(window_capturer))
-                         : nullptr;
+#endif
+  return std::make_unique<DesktopCapturerWrapper>(std::move(capturer));
 }
 
-std::unique_ptr<ThumbnailCapturer> MakeScreenCapturer() {
+std::unique_ptr<ThumbnailCapturer> MakeWindowCapturer(
+    bool persistent,
+    const std::string& restore_token) {
 #if BUILDFLAG(IS_MAC)
-  if (ShouldUseThumbnailCapturerMac(DesktopMediaList::Type::kScreen)) {
-    return CreateThumbnailCapturerMac(DesktopMediaList::Type::kScreen);
+  if (ShouldUseThumbnailCapturerMac(DesktopMediaList::Type::kWindow)) {
+    return CreateThumbnailCapturerMac(DesktopMediaList::Type::kWindow,
+                                      /*web_contents=*/nullptr);
   }
 #endif  // BUILDFLAG(IS_MAC)
 
-  std::unique_ptr<webrtc::DesktopCapturer> screen_capturer =
+  return WrapCapturer(
+      content::desktop_capture::CreateWindowCapturer(
+          content::desktop_capture::CreateDesktopCaptureOptions()),
+      persistent, restore_token);
+}
+
+std::unique_ptr<ThumbnailCapturer> MakeScreenCapturer(
+    bool persistent,
+    const std::string& restore_token) {
+#if BUILDFLAG(IS_MAC)
+  if (ShouldUseThumbnailCapturerMac(DesktopMediaList::Type::kScreen)) {
+    return CreateThumbnailCapturerMac(DesktopMediaList::Type::kScreen,
+                                      /*web_contents=*/nullptr);
+  }
+#endif  // BUILDFLAG(IS_MAC)
+
+  return WrapCapturer(
       content::desktop_capture::CreateScreenCapturer(
           content::desktop_capture::CreateDesktopCaptureOptions(),
-          /*for_snapshot=*/false);
-  return screen_capturer ? std::make_unique<DesktopCapturerWrapper>(
-                               std::move(screen_capturer))
-                         : nullptr;
+          /*for_snapshot=*/false),
+      persistent, restore_token);
 }
 
 #if BUILDFLAG(IS_WIN)
@@ -184,6 +223,12 @@ BOOL CALLBACK EnumDisplayMonitorsCallback(HMONITOR monitor,
   return TRUE;
 }
 #endif
+
+// Give native capturers a few refresh/capture cycles to populate the list
+// before returning the current snapshot. This preserves the old behavior of
+// making progress even when some sources never produce thumbnails (e.g., a
+// password manager window that's marked as uncapturable).
+constexpr base::TimeDelta kDesktopCapturerReadyTimeout = base::Seconds(3);
 
 }  // namespace
 
@@ -202,6 +247,7 @@ struct Converter<electron::api::DesktopCapturer::Source> {
              electron::api::NativeImage::Create(
                  isolate, gfx::Image(source.media_list_source.thumbnail)));
     dict.Set("display_id", source.display_id);
+    dict.Set("restoreToken", source.restore_token);
     if (source.fetch_icon) {
       dict.Set(
           "appIcon",
@@ -218,55 +264,115 @@ struct Converter<electron::api::DesktopCapturer::Source> {
 
 namespace electron::api {
 
-gin::DeprecatedWrapperInfo DesktopCapturer::kWrapperInfo = {
-    gin::kEmbedderNativeGin};
+const gin::WrapperInfo DesktopCapturer::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronDesktopCapturer);
 
-DesktopCapturer::DesktopCapturer(v8::Isolate* isolate) {}
+// Observer that forwards DesktopMediaListObserver events back to
+// the owning DesktopCapturer, tagging them with the list type so
+// the capturer knows which list fired.
+class DesktopCapturer::ListObserver : public DesktopMediaListObserver {
+ public:
+  ListObserver(DesktopCapturer* capturer,
+               DesktopMediaList* list,
+               bool need_thumbnails)
+      : capturer_{capturer->WeakCallbackTarget()},
+        list_{list},
+        list_type_{list->GetMediaListType()},
+        is_delegated_{list->IsSourceListDelegated()},
+        need_thumbnails_{need_thumbnails} {}
+  ~ListObserver() override = default;
+
+  [[nodiscard]] bool IsReady() const {
+    if (!has_sources_)
+      return false;
+
+    if (!need_thumbnails_)
+      return true;
+
+    // are all the thumbnails ready?
+    for (int i = 0; i < list_->GetSourceCount(); ++i) {
+      if (list_->GetSource(i).thumbnail.isNull())
+        return false;
+    }
+    return true;
+  }
+
+ private:
+  // Post OnListReady to the message loop when sources & thumbnails are done.
+  void MaybeNotifyReady() {
+    if (!IsReady() || notified_)
+      return;
+    notified_ = true;
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE,
+        base::BindOnce(&DesktopCapturer::OnListReady, capturer_, list_type_));
+  }
+
+  // DesktopMediaListObserver:
+  void OnSourceAdded(int index) override {
+    // Rely on OnDelegatedSourceListSelection for delegated source lists.
+    if (!is_delegated_)
+      has_sources_ = true;
+    MaybeNotifyReady();
+  }
+  void OnSourceRemoved(int index) override { MaybeNotifyReady(); }
+  void OnSourceMoved(int old_index, int new_index) override {}
+  void OnSourceNameChanged(int index) override {}
+  void OnSourceThumbnailChanged(int index) override { MaybeNotifyReady(); }
+  void OnSourcePreviewChanged(size_t index) override {}
+  void OnDelegatedSourceListSelection() override {
+    // For delegated source lists (e.g. PipeWire), the selection event means
+    // the user picked a source. Treat as ready once we also have a thumbnail.
+    has_sources_ = true;
+    MaybeNotifyReady();
+  }
+  void OnDelegatedSourceListDismissed() override {
+    base::SequencedTaskRunner::GetCurrentDefault()->PostTask(
+        FROM_HERE, base::BindOnce(&DesktopCapturer::HandleFailure, capturer_));
+  }
+
+  cppgc::Persistent<gin::WeakCell<DesktopCapturer>> capturer_;
+  raw_ptr<DesktopMediaList, DanglingUntriaged> list_;
+  DesktopMediaList::Type list_type_;
+  bool is_delegated_ = false;
+  bool need_thumbnails_ = false;
+  bool has_sources_ = false;
+  bool notified_ = false;
+};
+
+DesktopCapturer::DesktopCapturer() = default;
 
 DesktopCapturer::~DesktopCapturer() = default;
 
-DesktopCapturer::DesktopListListener::DesktopListListener(
-    OnceCallback update_callback,
-    OnceCallback failure_callback,
-    bool skip_thumbnails)
-    : update_callback_(std::move(update_callback)),
-      failure_callback_(std::move(failure_callback)),
-      have_thumbnail_(skip_thumbnails) {}
-
-DesktopCapturer::DesktopListListener::~DesktopListListener() = default;
-
-void DesktopCapturer::DesktopListListener::OnDelegatedSourceListSelection() {
-  if (have_thumbnail_) {
-    content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE,
-                                                 std::move(update_callback_));
-  } else {
-    have_selection_ = true;
-  }
+cppgc::Persistent<gin::WeakCell<DesktopCapturer>>
+DesktopCapturer::WeakCallbackTarget() {
+  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+  return gin::WrapPersistent(
+      weak_factory_.GetWeakCell(isolate->GetCppHeap()->GetAllocationHandle()));
 }
 
-void DesktopCapturer::DesktopListListener::OnSourceThumbnailChanged(int index) {
-  if (have_selection_) {
-    // This is called every time a thumbnail is refreshed. Reset variable to
-    // ensure that the callback is not run again.
-    have_selection_ = false;
+void DesktopCapturer::FinalizeList(std::unique_ptr<ListObserver>& observer,
+                                   std::unique_ptr<DesktopMediaList>& list) {
+  DCHECK(observer);
+  DCHECK(list);
 
-    // PipeWire returns a single source, so index is not relevant.
-    content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE,
-                                                 std::move(update_callback_));
-  } else {
-    have_thumbnail_ = true;
-  }
-}
+  CollectSourcesFrom(list.get());
+  if (finished_)
+    return;
 
-void DesktopCapturer::DesktopListListener::OnDelegatedSourceListDismissed() {
-  content::GetUIThreadTaskRunner({})->PostTask(FROM_HERE,
-                                               std::move(failure_callback_));
+  list.reset();
+  observer.reset();
+
+  if (--pending_lists_ == 0)
+    HandleSuccess();
 }
 
 void DesktopCapturer::StartHandling(bool capture_window,
                                     bool capture_screen,
                                     const gfx::Size& thumbnail_size,
-                                    bool fetch_window_icons) {
+                                    bool fetch_window_icons,
+                                    bool persistent,
+                                    const std::string& restore_token) {
   fetch_window_icons_ = fetch_window_icons;
 #if BUILDFLAG(IS_WIN)
   if (content::desktop_capture::CreateDesktopCaptureOptions()
@@ -280,41 +386,9 @@ void DesktopCapturer::StartHandling(bool capture_window,
 
   // clear any existing captured sources.
   captured_sources_.clear();
-
-  if (capture_window && capture_screen) {
-    // Some capturers like PipeWire support a single capturer for both screens
-    // and windows. Use it if possible, treating both as window capture
-    std::unique_ptr<webrtc::DesktopCapturer> desktop_capturer =
-        webrtc::DesktopCapturer::CreateGenericCapturer(
-            content::desktop_capture::CreateDesktopCaptureOptions());
-    auto capturer = desktop_capturer ? std::make_unique<DesktopCapturerWrapper>(
-                                           std::move(desktop_capturer))
-                                     : nullptr;
-    if (capturer && capturer->GetDelegatedSourceListController()) {
-      capture_screen_ = false;
-      capture_window_ = capture_window;
-      window_capturer_ = std::make_unique<NativeDesktopMediaList>(
-          DesktopMediaList::Type::kWindow, std::move(capturer), true, true);
-      window_capturer_->SetThumbnailSize(thumbnail_size);
-
-      OnceCallback update_callback = base::BindOnce(
-          &DesktopCapturer::UpdateSourcesList, weak_ptr_factory_.GetWeakPtr(),
-          window_capturer_.get());
-      OnceCallback failure_callback = base::BindOnce(
-          &DesktopCapturer::HandleFailure, weak_ptr_factory_.GetWeakPtr());
-
-      window_listener_ = std::make_unique<DesktopListListener>(
-          std::move(update_callback), std::move(failure_callback),
-          thumbnail_size.IsEmpty());
-      window_capturer_->StartUpdating(window_listener_.get());
-
-      return;
-    }
-  }
-
-  // Start listening for captured sources.
-  capture_window_ = capture_window;
-  capture_screen_ = capture_screen;
+  finished_ = false;
+  pending_lists_ = 0;
+  deadline_.Stop();
 
 #if BUILDFLAG(IS_MAC)
   if (!ui::TryPromptUserForScreenCapture()) {
@@ -323,95 +397,118 @@ void DesktopCapturer::StartHandling(bool capture_window,
   }
 #endif
 
-  {
-    // Initialize the source list.
-    // Apply the new thumbnail size and restart capture.
-    if (capture_window) {
-      auto capturer = MakeWindowCapturer();
-      if (capturer) {
-        window_capturer_ = std::make_unique<NativeDesktopMediaList>(
-            DesktopMediaList::Type::kWindow, std::move(capturer), true, true);
-        window_capturer_->SetThumbnailSize(thumbnail_size);
-#if BUILDFLAG(IS_MAC)
-        window_capturer_->skip_next_refresh_ =
-            ShouldUseThumbnailCapturerMac(DesktopMediaList::Type::kWindow)
-                ? thumbnail_size.IsEmpty() ? 1 : 2
-                : 0;
-#endif
+  const bool need_thumbnails = !thumbnail_size.IsEmpty();
+  bool need_screen = capture_screen;
 
-        OnceCallback update_callback = base::BindOnce(
-            &DesktopCapturer::UpdateSourcesList, weak_ptr_factory_.GetWeakPtr(),
-            window_capturer_.get());
-
-        if (window_capturer_->IsSourceListDelegated()) {
-          OnceCallback failure_callback = base::BindOnce(
-              &DesktopCapturer::HandleFailure, weak_ptr_factory_.GetWeakPtr());
-          window_listener_ = std::make_unique<DesktopListListener>(
-              std::move(update_callback), std::move(failure_callback),
-              thumbnail_size.IsEmpty());
-          window_capturer_->StartUpdating(window_listener_.get());
-        } else {
-          window_capturer_->Update(std::move(update_callback),
-                                   /* refresh_thumbnails = */ true);
-        }
-      }
-    }
-
+  if (capture_window) {
+    // Some capturers like PipeWire support a single capturer for both screens
+    // and windows. Use it if possible, treating both as window capture.
+    std::unique_ptr<ThumbnailCapturer> capturer;
+    bool use_generic = false;
     if (capture_screen) {
-      auto capturer = MakeScreenCapturer();
-      if (capturer) {
-        screen_capturer_ = std::make_unique<NativeDesktopMediaList>(
-            DesktopMediaList::Type::kScreen, std::move(capturer));
-        screen_capturer_->SetThumbnailSize(thumbnail_size);
-#if BUILDFLAG(IS_MAC)
-        screen_capturer_->skip_next_refresh_ =
-            ShouldUseThumbnailCapturerMac(DesktopMediaList::Type::kScreen)
-                ? thumbnail_size.IsEmpty() ? 1 : 2
-                : 0;
-#endif
-
-        OnceCallback update_callback = base::BindOnce(
-            &DesktopCapturer::UpdateSourcesList, weak_ptr_factory_.GetWeakPtr(),
-            screen_capturer_.get());
-
-        if (screen_capturer_->IsSourceListDelegated()) {
-          OnceCallback failure_callback = base::BindOnce(
-              &DesktopCapturer::HandleFailure, weak_ptr_factory_.GetWeakPtr());
-          screen_listener_ = std::make_unique<DesktopListListener>(
-              std::move(update_callback), std::move(failure_callback),
-              thumbnail_size.IsEmpty());
-          screen_capturer_->StartUpdating(screen_listener_.get());
-        } else {
-          screen_capturer_->Update(std::move(update_callback),
-                                   /* refresh_thumbnails = */ true);
-        }
+      auto generic = WrapCapturer(
+          webrtc::DesktopCapturer::CreateGenericCapturer(
+              content::desktop_capture::CreateDesktopCaptureOptions()),
+          persistent, restore_token);
+      if (generic && generic->GetDelegatedSourceListController()) {
+        capturer = std::move(generic);
+        use_generic = true;
+        // Generic capturer handles both types as window capture.
+        need_screen = false;
       }
     }
+    if (!capturer)
+      capturer = MakeWindowCapturer(persistent, restore_token);
+
+    if (capturer) {
+      window_capturer_ = std::make_unique<NativeDesktopMediaList>(
+          DesktopMediaList::Type::kWindow, std::move(capturer),
+          /* add_current_process_windows = */ true,
+          /* auto_show_delegated_source_list = */ use_generic);
+      window_capturer_->SetThumbnailSize(thumbnail_size);
+      window_observer_ = std::make_unique<ListObserver>(
+          this, window_capturer_.get(), need_thumbnails);
+      window_capturer_->StartUpdating(window_observer_.get());
+      pending_lists_++;
+    }
+  }
+
+  if (need_screen) {
+    auto capturer = MakeScreenCapturer(persistent, restore_token);
+    if (capturer) {
+      screen_capturer_ = std::make_unique<NativeDesktopMediaList>(
+          DesktopMediaList::Type::kScreen, std::move(capturer));
+      screen_capturer_->SetThumbnailSize(thumbnail_size);
+      screen_observer_ = std::make_unique<ListObserver>(
+          this, screen_capturer_.get(), need_thumbnails);
+      screen_capturer_->StartUpdating(screen_observer_.get());
+      pending_lists_++;
+    }
+  }
+
+  // If no capturers were created (e.g. all factories returned nullptr),
+  // resolve immediately with an empty source list.
+  if (pending_lists_ == 0) {
+    HandleSuccess();
+    return;
+  }
+
+  const bool any_delegated =
+      (window_capturer_ && window_capturer_->IsSourceListDelegated()) ||
+      (screen_capturer_ && screen_capturer_->IsSourceListDelegated());
+  if (!any_delegated) {
+    deadline_.Start(
+        FROM_HERE, kDesktopCapturerReadyTimeout,
+        base::BindOnce(&DesktopCapturer::OnReadyTimeout, WeakCallbackTarget()));
   }
 }
 
-void DesktopCapturer::UpdateSourcesList(DesktopMediaList* list) {
-  if (capture_window_ &&
-      list->GetMediaListType() == DesktopMediaList::Type::kWindow) {
-    capture_window_ = false;
-    std::vector<DesktopCapturer::Source> window_sources;
-    window_sources.reserve(list->GetSourceCount());
-    for (int i = 0; i < list->GetSourceCount(); i++) {
-      window_sources.emplace_back(list->GetSource(i), std::string(),
-                                  fetch_window_icons_);
-    }
-    std::move(window_sources.begin(), window_sources.end(),
-              std::back_inserter(captured_sources_));
+void DesktopCapturer::OnListReady(const DesktopMediaList::Type type) {
+  if (finished_)
+    return;
+
+  switch (type) {
+    case DesktopMediaList::Type::kWindow:
+      if (window_capturer_)
+        FinalizeList(window_observer_, window_capturer_);
+      break;
+    case DesktopMediaList::Type::kScreen:
+      if (screen_capturer_)
+        FinalizeList(screen_observer_, screen_capturer_);
+      break;
+    default:
+      NOTREACHED();
+  }
+}
+
+void DesktopCapturer::OnReadyTimeout() {
+  if (finished_)
+    return;
+
+  if (window_capturer_)
+    FinalizeList(window_observer_, window_capturer_);
+
+  if (finished_)
+    return;
+
+  if (screen_capturer_)
+    FinalizeList(screen_observer_, screen_capturer_);
+
+  DCHECK(finished_ || pending_lists_ > 0);
+}
+
+void DesktopCapturer::CollectSourcesFrom(DesktopMediaList* list) {
+  const bool is_screen_list =
+      list->GetMediaListType() == DesktopMediaList::Type::kScreen;
+
+  std::vector<DesktopCapturer::Source> sources;
+  sources.reserve(list->GetSourceCount());
+  for (int i = 0; i < list->GetSourceCount(); i++) {
+    sources.emplace_back(list->GetSource(i), std::string(),
+                         !is_screen_list && fetch_window_icons_);
   }
 
-  if (capture_screen_ &&
-      list->GetMediaListType() == DesktopMediaList::Type::kScreen) {
-    capture_screen_ = false;
-    std::vector<DesktopCapturer::Source> screen_sources;
-    screen_sources.reserve(list->GetSourceCount());
-    for (int i = 0; i < list->GetSourceCount(); i++) {
-      screen_sources.emplace_back(list->GetSource(i), std::string());
-    }
+  if (is_screen_list) {
 #if BUILDFLAG(IS_WIN)
     // Gather the same unique screen IDs used by the electron.screen API in
     // order to provide an association between it and
@@ -420,13 +517,13 @@ void DesktopCapturer::UpdateSourcesList(DesktopMediaList* list) {
     if (using_directx_capturer_) {
       std::vector<std::string> device_names;
       // Crucially, this list of device names will be in the same order as
-      // |screen_sources|.
+      // |sources|.
       if (!webrtc::DxgiDuplicatorController::Instance()->GetDeviceNames(
               &device_names)) {
         HandleFailure();
         return;
       }
-      DCHECK_EQ(device_names.size(), screen_sources.size());
+      DCHECK_EQ(device_names.size(), sources.size());
 
       std::vector<HMONITOR> monitors;
       EnumDisplayMonitors(nullptr, nullptr, EnumDisplayMonitorsCallback,
@@ -446,7 +543,7 @@ void DesktopCapturer::UpdateSourcesList(DesktopMediaList* list) {
       }
 
       int device_name_index = 0;
-      for (auto& source : screen_sources) {
+      for (auto& source : sources) {
         const auto& device_name = device_names[device_name_index++];
         if (auto id_iter = device_name_to_id.find(device_name);
             id_iter != device_name_to_id.end()) {
@@ -456,42 +553,62 @@ void DesktopCapturer::UpdateSourcesList(DesktopMediaList* list) {
     }
 #elif BUILDFLAG(IS_MAC)
     // On Mac, the IDs across the APIs match.
-    for (auto& source : screen_sources) {
+    for (auto& source : sources) {
       source.display_id = base::NumberToString(source.media_list_source.id.id);
     }
-#elif BUILDFLAG(IS_OZONE_X11)
+#elif BUILDFLAG(SUPPORTS_OZONE_X11)
     // On Linux, with X11, the source id is the numeric value of the
     // display name atom and the display id is either the EDID or the
     // loop index when that display was found (see
     // BuildDisplaysFromXRandRInfo in ui/base/x/x11_display_util.cc)
     const auto monitor_atom_to_display_id = MonitorAtomIdToDisplayId();
-    for (auto& source : screen_sources) {
+    for (auto& source : sources) {
       auto display_id_iter =
           monitor_atom_to_display_id.find(source.media_list_source.id.id);
       if (display_id_iter != monitor_atom_to_display_id.end())
         source.display_id = base::NumberToString(display_id_iter->second);
     }
 #endif
-    std::move(screen_sources.begin(), screen_sources.end(),
-              std::back_inserter(captured_sources_));
   }
 
-  if (!capture_window_ && !capture_screen_)
-    HandleSuccess();
+#if defined(WEBRTC_USE_PIPEWIRE)
+  if (list->IsSourceListDelegated()) {
+    for (auto& source : sources) {
+      source.restore_token = webrtc::RestoreTokenManager::GetInstance()
+                                 .GetEntry(source.media_list_source.id.id)
+                                 .token;
+    }
+  }
+#endif
+
+  std::move(sources.begin(), sources.end(),
+            std::back_inserter(captured_sources_));
 }
 
 void DesktopCapturer::HandleSuccess() {
+  if (finished_)
+    return;
+  finished_ = true;
+  deadline_.Stop();
+
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
   gin_helper::CallMethod(this, "_onfinished", captured_sources_);
 
   screen_capturer_.reset();
   window_capturer_.reset();
+  window_observer_.reset();
+  screen_observer_.reset();
 
-  Unpin();
+  keep_alive_.Clear();
 }
 
 void DesktopCapturer::HandleFailure() {
+  if (finished_)
+    return;
+  finished_ = true;
+  deadline_.Stop();
+
   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
   v8::HandleScope scope(isolate);
 
@@ -499,19 +616,16 @@ void DesktopCapturer::HandleFailure() {
 
   screen_capturer_.reset();
   window_capturer_.reset();
+  window_observer_.reset();
+  screen_observer_.reset();
 
-  Unpin();
+  keep_alive_.Clear();
 }
 
 // static
-gin_helper::Handle<DesktopCapturer> DesktopCapturer::Create(
-    v8::Isolate* isolate) {
-  auto handle = gin_helper::CreateHandle(isolate, new DesktopCapturer(isolate));
-
-  // Keep reference alive until capturing has finished.
-  handle->Pin(isolate);
-
-  return handle;
+DesktopCapturer* DesktopCapturer::Create(v8::Isolate* isolate) {
+  return cppgc::MakeGarbageCollected<DesktopCapturer>(
+      isolate->GetCppHeap()->GetAllocationHandle());
 }
 
 // static
@@ -521,15 +635,36 @@ bool DesktopCapturer::IsDisplayMediaSystemPickerAvailable() {
 }
 #endif
 
+// static
+std::string DesktopCapturer::GetRestoreToken(const std::string& source_id) {
+#if defined(WEBRTC_USE_PIPEWIRE)
+  const content::DesktopMediaID id = content::DesktopMediaID::Parse(source_id);
+  if (id.id_type == content::DesktopMediaID::IdType::kNativePickerSession &&
+      (id.type == content::DesktopMediaID::TYPE_SCREEN ||
+       id.type == content::DesktopMediaID::TYPE_WINDOW)) {
+    return webrtc::RestoreTokenManager::GetInstance().GetEntry(id.id).token;
+  }
+#endif
+  return {};
+}
+
 gin::ObjectTemplateBuilder DesktopCapturer::GetObjectTemplateBuilder(
     v8::Isolate* isolate) {
-  return gin_helper::DeprecatedWrappable<
-             DesktopCapturer>::GetObjectTemplateBuilder(isolate)
+  return gin::Wrappable<DesktopCapturer>::GetObjectTemplateBuilder(isolate)
       .SetMethod("startHandling", &DesktopCapturer::StartHandling);
 }
 
-const char* DesktopCapturer::GetTypeName() {
-  return "DesktopCapturer";
+void DesktopCapturer::Trace(cppgc::Visitor* visitor) const {
+  gin::Wrappable<DesktopCapturer>::Trace(visitor);
+  visitor->Trace(weak_factory_);
+}
+
+const gin::WrapperInfo* DesktopCapturer::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* DesktopCapturer::GetHumanReadableName() const {
+  return "Electron / DesktopCapturer";
 }
 
 }  // namespace electron::api
@@ -542,11 +677,13 @@ void Initialize(v8::Local<v8::Object> exports,
                 void* priv) {
   v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
   gin_helper::Dictionary dict{isolate, exports};
-  dict.SetMethod("createDesktopCapturer",
-                 &electron::api::DesktopCapturer::Create);
-  dict.SetMethod(
-      "isDisplayMediaSystemPickerAvailable",
-      &electron::api::DesktopCapturer::IsDisplayMediaSystemPickerAvailable);
+  dict.SetMethod<&electron::api::DesktopCapturer::Create>(
+      "createDesktopCapturer");
+  dict.SetMethod<
+      &electron::api::DesktopCapturer::IsDisplayMediaSystemPickerAvailable>(
+      "isDisplayMediaSystemPickerAvailable");
+  dict.SetMethod<&electron::api::DesktopCapturer::GetRestoreToken>(
+      "getRestoreToken");
 }
 
 }  // namespace

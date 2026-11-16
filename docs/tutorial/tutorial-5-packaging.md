@@ -41,13 +41,25 @@ have to worry about wiring them all together.
 
 ### Importing your project into Forge
 
-You can install Electron Forge's CLI in your project's `devDependencies` and import your
-existing project with a handy conversion script.
+Electron Forge's `create-electron-app` package can import your existing project with a handy
+conversion script, which also installs Forge's CLI in your project's `devDependencies` for you.
 
-```sh npm2yarn
-npm install --save-dev @electron-forge/cli
-npx electron-forge import
+<Tabs>
+  <TabItem value="npm" label="npm">
+
+```sh
+npx create-electron-app@latest import
 ```
+
+  </TabItem>
+  <TabItem value="yarn" label="Yarn">
+
+```sh
+yarn create electron-app import
+```
+
+  </TabItem>
+</Tabs>
 
 Once the conversion script is done, Forge should have added a few scripts
 to your `package.json` file.

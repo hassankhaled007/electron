@@ -10,7 +10,7 @@ hide_title: false
 ## Accelerators
 
 Accelerators are strings that can be used to represent keyboard shortcuts throughout your Electron.
-These strings can contain multiple modifiers keys and a single key code joined by the `+` character.
+These strings can contain multiple modifier keys and a single key code joined by the `+` character.
 
 > [!NOTE]
 > Accelerators are **case-insensitive**.
@@ -108,11 +108,13 @@ if (process.platform === 'darwin') {
 }
 
 // highlight-start
-const submenu = Menu.buildFromTemplate([{
-  label: 'Open a Dialog',
-  click: () => dialog.showMessageBox({ message: 'Hello World!' }),
-  accelerator: 'CommandOrControl+Alt+R'
-}])
+const submenu = Menu.buildFromTemplate([
+  {
+    label: 'Open a Dialog',
+    click: () => dialog.showMessageBox({ message: 'Hello World!' }),
+    accelerator: 'CommandOrControl+Alt+R'
+  }
+])
 menu.append(new MenuItem({ label: 'Custom Menu', submenu }))
 // highlight-end
 

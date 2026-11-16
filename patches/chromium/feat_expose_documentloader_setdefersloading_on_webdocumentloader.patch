@@ -7,18 +7,19 @@ This allows embedders to call SetDefersLoading without reaching into Blink inter
 This might be upstreamable?
 
 diff --git a/third_party/blink/public/web/web_document_loader.h b/third_party/blink/public/web/web_document_loader.h
-index 33e23680b927d417b0882c7572fe32dc2d2b90c3..9413492f8e0fd6c5371c66329e1ad6d4163ba670 100644
+index b6da61a76551f1de95b8cfb0a1167b14040f3dd1..9413492f8e0fd6c5371c66329e1ad6d4163ba670 100644
 --- a/third_party/blink/public/web/web_document_loader.h
 +++ b/third_party/blink/public/web/web_document_loader.h
-@@ -38,6 +38,7 @@
+@@ -38,6 +38,8 @@
  #include "third_party/blink/public/platform/cross_variant_mojo_util.h"
  #include "third_party/blink/public/platform/web_archive_info.h"
  #include "third_party/blink/public/platform/web_common.h"
 +#include "third_party/blink/public/platform/web_loader_freeze_mode.h"
- #include "third_party/blink/public/platform/web_source_location.h"
++#include "third_party/blink/public/platform/web_source_location.h"
  #include "third_party/blink/public/web/web_navigation_type.h"
  
-@@ -63,6 +64,8 @@ class BLINK_EXPORT WebDocumentLoader {
+ namespace blink {
+@@ -62,6 +64,8 @@ class BLINK_EXPORT WebDocumentLoader {
      virtual std::unique_ptr<ExtraData> Clone() = 0;
    };
  
@@ -28,10 +29,10 @@ index 33e23680b927d417b0882c7572fe32dc2d2b90c3..9413492f8e0fd6c5371c66329e1ad6d4
  
    // Returns the http referrer of original request which initited this load.
 diff --git a/third_party/blink/renderer/core/loader/document_loader.h b/third_party/blink/renderer/core/loader/document_loader.h
-index d09ec0ea7cfb4f9220ac0923627c024a8a42e3b7..2c7538e85920baef6aa1120b62598bf98717e1a8 100644
+index de83c37e34ebf9b7daacb32c049ba5612148f66f..25dbd6ac4df45e59900c35b704259854c3d3a06d 100644
 --- a/third_party/blink/renderer/core/loader/document_loader.h
 +++ b/third_party/blink/renderer/core/loader/document_loader.h
-@@ -321,7 +321,7 @@ class CORE_EXPORT DocumentLoader : public GarbageCollected<DocumentLoader>,
+@@ -329,7 +329,7 @@ class CORE_EXPORT DocumentLoader : public GarbageCollected<DocumentLoader>,
        std::optional<scheduler::TaskAttributionId> task_state_id,
        bool should_skip_screenshot);
  

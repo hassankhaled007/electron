@@ -10,40 +10,119 @@
 
 #include "base/command_line.h"
 #include "base/files/file_path.h"
+#include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/notimplemented.h"
 #include "base/path_service.h"
 #include "chrome/browser/browser_process.h"
+#include "chrome/browser/hid/hid_system_tray_icon.h"
+#include "chrome/browser/usb/usb_system_tray_icon.h"
 #include "chrome/common/chrome_switches.h"
 #include "components/os_crypt/async/browser/key_provider.h"
 #include "components/os_crypt/async/browser/os_crypt_async.h"
-#include "components/os_crypt/sync/os_crypt.h"
 #include "components/prefs/in_memory_pref_store.h"
 #include "components/prefs/json_pref_store.h"
-#include "components/prefs/overlay_user_pref_store.h"
 #include "components/prefs/pref_registry.h"
 #include "components/prefs/pref_registry_simple.h"
 #include "components/prefs/pref_service.h"
 #include "components/prefs/pref_service_factory.h"
+#include "components/prefs/value_map_pref_store.h"
 #include "components/proxy_config/pref_proxy_config_tracker_impl.h"
 #include "components/proxy_config/proxy_config_dictionary.h"
 #include "components/proxy_config/proxy_config_pref_names.h"
+#include "components/supervised_user/core/browser/device_parental_controls_noop_impl.h"  // nogncheck
 #include "content/public/browser/child_process_security_policy.h"
 #include "content/public/browser/network_quality_observer_factory.h"
 #include "content/public/browser/network_service_instance.h"
-#include "content/public/common/content_switches.h"
+#include "electron/buildflags/buildflags.h"
 #include "extensions/common/constants.h"
 #include "net/proxy_resolution/proxy_config.h"
 #include "net/proxy_resolution/proxy_config_service.h"
 #include "net/proxy_resolution/proxy_config_with_annotation.h"
 #include "services/device/public/cpp/geolocation/geolocation_system_permission_manager.h"
 #include "services/network/public/cpp/network_switches.h"
+#include "shell/browser/metrics/electron_metrics_service_client.h"
 #include "shell/browser/net/resolve_proxy_helper.h"
+#include "shell/common/electron_constants.h"
 #include "shell/common/electron_paths.h"
 #include "shell/common/thread_restrictions.h"
+
+#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+#include "components/storage_monitor/storage_monitor.h"
+#endif
 
 #if BUILDFLAG(ENABLE_PRINTING)
 #include "chrome/browser/printing/print_job_manager.h"
 #endif
+
+#if BUILDFLAG(IS_LINUX)
+#include "base/environment.h"
+#include "base/nix/xdg_util.h"
+#include "chrome/browser/browser_features.h"
+#include "components/os_crypt/async/browser/freedesktop_secret_key_provider.h"
+#include "components/os_crypt/async/browser/secret_portal_key_provider.h"
+#include "components/password_manager/core/browser/password_manager_switches.h"  // nogncheck
+#include "shell/common/application_info.h"
+
+#endif
+
+#if BUILDFLAG(IS_WIN)
+#include "components/os_crypt/async/browser/dpapi_key_provider.h"
+#include "components/os_crypt/async/browser/os_crypt_win.h"
+#endif
+
+#if BUILDFLAG(IS_MAC)
+#include "chrome/common/chrome_features.h"
+#include "components/os_crypt/async/browser/keychain_key_provider.h"
+#endif
+
+#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_MAC)
+#include "components/os_crypt/async/browser/posix_key_provider.h"
+#endif
+
+#if BUILDFLAG(IS_LINUX)
+namespace {
+
+// The name safeStorage.getSelectedStorageBackend() reports for the
+// --password-store switch and desktop environment.
+const char* SelectLinuxStorageBackend(const std::string& password_store) {
+  if (password_store == "kwallet")
+    return "kwallet";
+  if (password_store == "kwallet5")
+    return "kwallet5";
+  if (password_store == "kwallet6")
+    return "kwallet6";
+  if (password_store == "gnome-libsecret")
+    return "gnome_libsecret";
+  if (password_store == "basic")
+    return "basic_text";
+
+  auto env = base::Environment::Create();
+  switch (base::nix::GetDesktopEnvironment(env.get())) {
+    case base::nix::DESKTOP_ENVIRONMENT_KDE4:
+      return "kwallet";
+    case base::nix::DESKTOP_ENVIRONMENT_KDE5:
+      return "kwallet5";
+    case base::nix::DESKTOP_ENVIRONMENT_KDE6:
+      return "kwallet6";
+    case base::nix::DESKTOP_ENVIRONMENT_CINNAMON:
+    case base::nix::DESKTOP_ENVIRONMENT_DEEPIN:
+    case base::nix::DESKTOP_ENVIRONMENT_GNOME:
+    case base::nix::DESKTOP_ENVIRONMENT_PANTHEON:
+    case base::nix::DESKTOP_ENVIRONMENT_UKUI:
+    case base::nix::DESKTOP_ENVIRONMENT_UNITY:
+    case base::nix::DESKTOP_ENVIRONMENT_XFCE:
+    case base::nix::DESKTOP_ENVIRONMENT_COSMIC:
+      return "gnome_libsecret";
+    case base::nix::DESKTOP_ENVIRONMENT_KDE3:
+    case base::nix::DESKTOP_ENVIRONMENT_LXQT:
+    case base::nix::DESKTOP_ENVIRONMENT_OTHER:
+      return "basic_text";
+  }
+}
+
+}  // namespace
+#endif  // BUILDFLAG(IS_LINUX)
 
 BrowserProcessImpl::BrowserProcessImpl() {
   g_browser_process = this;
@@ -115,24 +194,37 @@ void BrowserProcessImpl::PostEarlyInitialization() {
   PrefServiceFactory prefs_factory;
   auto pref_registry = base::MakeRefCounted<PrefRegistrySimple>();
   PrefProxyConfigTrackerImpl::RegisterPrefs(pref_registry.get());
+  electron::ElectronMetricsServiceClient::RegisterMetricsPrefs(
+      pref_registry.get());
+
 #if BUILDFLAG(IS_WIN)
-  OSCrypt::RegisterLocalPrefs(pref_registry.get());
+  os_crypt_async::RegisterLocalPrefs(pref_registry.get());
 #endif
+
+#if BUILDFLAG(IS_LINUX)
+  os_crypt_async::SecretPortalKeyProvider::RegisterLocalPrefs(
+      pref_registry.get());
+#endif
+
+  pref_registry->RegisterDictionaryPref(electron::kWindowStates);
 
   in_memory_pref_store_ = base::MakeRefCounted<ValueMapPrefStore>();
   ApplyProxyModeFromCommandLine(in_memory_pref_store());
   prefs_factory.set_command_line_prefs(in_memory_pref_store());
 
-  // Only use a persistent prefs store when cookie encryption is enabled as that
-  // is the only key that needs it
   base::FilePath prefs_path;
   CHECK(base::PathService::Get(electron::DIR_SESSION_DATA, &prefs_path));
+  if (!base::DirectoryExists(prefs_path))
+    base::CreateDirectory(prefs_path);
   prefs_path = prefs_path.Append(FILE_PATH_LITERAL("Local State"));
+
   electron::ScopedAllowBlockingForElectron allow_blocking;
   scoped_refptr<JsonPrefStore> user_pref_store =
       base::MakeRefCounted<JsonPrefStore>(prefs_path);
   user_pref_store->ReadPrefs();
   prefs_factory.set_user_prefs(user_pref_store);
+  DCHECK(user_pref_store->IsInitializationComplete());
+
   local_state_ = prefs_factory.Create(std::move(pref_registry));
 }
 
@@ -140,20 +232,35 @@ void BrowserProcessImpl::PreCreateThreads() {
   // chrome-extension:// URLs are safe to request anywhere, but may only
   // commit (including in iframes) in extension processes.
   content::ChildProcessSecurityPolicy::GetInstance()
-      ->RegisterWebSafeIsolatedScheme(extensions::kExtensionScheme, true);
+      ->RegisterWebSafeIsolatedScheme(extensions::kExtensionScheme);
   // Must be created before the IOThread.
   // Once IOThread class is no longer needed,
   // this can be created on first use.
   if (!SystemNetworkContextManager::GetInstance())
     SystemNetworkContextManager::CreateInstance(local_state_.get());
+
+  // Needs to be called here as per
+  // https://source.chromium.org/chromium/chromium/src/+/main:chrome/browser/chrome_browser_main.cc;l=1385-1389;drc=c3bda003554dad21313fb24b7a4f3e1aae6102d9.
+  CreateMetricsServiceClient();
 }
 
 void BrowserProcessImpl::PreMainMessageLoopRun() {
   CreateNetworkQualityObserver();
   CreateOSCryptAsync();
+#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+  // chrome.system.storage dereferences the global monitor without a null
+  // check. Device scanning only starts on first use.
+  storage_monitor::StorageMonitor::Create();
+#endif
 }
 
 void BrowserProcessImpl::PostMainMessageLoopRun() {
+#if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+  // Must outlive browser contexts: removing a chrome.system.storage listener
+  // when a context shuts down reaches for the monitor.
+  storage_monitor::StorageMonitor::Destroy();
+#endif
+
   if (local_state_)
     local_state_->CommitPendingWrite();
 
@@ -171,7 +278,8 @@ BrowserProcessImpl::GetMetricsServicesManager() {
 }
 
 metrics::MetricsService* BrowserProcessImpl::metrics_service() {
-  return nullptr;
+  return metrics_service_client_ ? metrics_service_client_->GetMetricsService()
+                                 : nullptr;
 }
 
 ProfileManager* BrowserProcessImpl::profile_manager() {
@@ -251,6 +359,18 @@ BrowserProcessImpl::background_printing_manager() {
   return nullptr;
 }
 
+supervised_user::DeviceParentalControls&
+BrowserProcessImpl::device_parental_controls() {
+  if (!device_parental_controls_)
+    device_parental_controls_ =
+        std::make_unique<supervised_user::DeviceParentalControlsNoOpImpl>();
+  return *device_parental_controls_;
+}
+
+activity_reporter::ActivityReporter* BrowserProcessImpl::activity_reporter() {
+  return nullptr;
+}
+
 IntranetRedirectDetector* BrowserProcessImpl::intranet_redirect_detector() {
   return nullptr;
 }
@@ -315,7 +435,18 @@ HidSystemTrayIcon* BrowserProcessImpl::hid_system_tray_icon() {
   return nullptr;
 }
 
+void BrowserProcessImpl::set_hid_system_tray_icon_for_test(
+    std::unique_ptr<HidSystemTrayIcon> icon) {}
+
 UsbSystemTrayIcon* BrowserProcessImpl::usb_system_tray_icon() {
+  return nullptr;
+}
+
+void BrowserProcessImpl::set_usb_system_tray_icon_for_test(
+    std::unique_ptr<UsbSystemTrayIcon> icon) {}
+
+speech::SpeechRecognitionSmallExpertModelInstaller*
+BrowserProcessImpl::speech_recognition_small_expert_model_installer() {
   return nullptr;
 }
 
@@ -342,31 +473,6 @@ electron::ResolveProxyHelper* BrowserProcessImpl::GetResolveProxyHelper() {
   }
   return resolve_proxy_helper_.get();
 }
-
-#if BUILDFLAG(IS_LINUX)
-void BrowserProcessImpl::SetLinuxStorageBackend(
-    os_crypt::SelectedLinuxBackend selected_backend) {
-  switch (selected_backend) {
-    case os_crypt::SelectedLinuxBackend::BASIC_TEXT:
-      selected_linux_storage_backend_ = "basic_text";
-      break;
-    case os_crypt::SelectedLinuxBackend::GNOME_LIBSECRET:
-      selected_linux_storage_backend_ = "gnome_libsecret";
-      break;
-    case os_crypt::SelectedLinuxBackend::KWALLET:
-      selected_linux_storage_backend_ = "kwallet";
-      break;
-    case os_crypt::SelectedLinuxBackend::KWALLET5:
-      selected_linux_storage_backend_ = "kwallet5";
-      break;
-    case os_crypt::SelectedLinuxBackend::KWALLET6:
-      selected_linux_storage_backend_ = "kwallet6";
-      break;
-    case os_crypt::SelectedLinuxBackend::DEFER:
-      NOTREACHED();
-  }
-}
-#endif  // BUILDFLAG(IS_LINUX)
 
 void BrowserProcessImpl::SetApplicationLocale(const std::string& locale) {
   locale_ = locale;
@@ -406,16 +512,69 @@ void BrowserProcessImpl::CreateNetworkQualityObserver() {
 }
 
 void BrowserProcessImpl::CreateOSCryptAsync() {
-  // source: https://chromium-review.googlesource.com/c/chromium/src/+/4455776
+  std::vector<std::pair<size_t, std::unique_ptr<os_crypt_async::KeyProvider>>>
+      providers;
 
-  // For now, initialize OSCryptAsync with no providers. This delegates all
-  // encryption operations to OSCrypt.
-  // TODO(crbug.com/1373092): Add providers behind features, as support for them
-  // is added.
-  os_crypt_async_ = std::make_unique<os_crypt_async::OSCryptAsync>(
-      std::vector<
-          std::pair<size_t, std::unique_ptr<os_crypt_async::KeyProvider>>>());
+#if BUILDFLAG(IS_WIN)
+  // Requires os_crypt_async::Init to have loaded the key, which happens in
+  // ElectronBrowserMainParts::PreCreateMainMessageLoop.
+  providers.emplace_back(
+      /*precedence=*/10u,
+      std::make_unique<os_crypt_async::DPAPIKeyProvider>(local_state()));
+#endif  // BUILDFLAG(IS_WIN)
 
-  // Trigger async initialization of OSCrypt key providers.
-  os_crypt_async_->GetInstance(base::DoNothing());
+#if BUILDFLAG(IS_LINUX)
+  base::CommandLine* cmd_line = base::CommandLine::ForCurrentProcess();
+  const auto password_store =
+      cmd_line->GetSwitchValueASCII(password_manager::kPasswordStore);
+  selected_linux_storage_backend_ = SelectLinuxStorageBackend(password_store);
+
+  if (password_store != "basic" &&
+      base::FeatureList::IsEnabled(features::kDbusSecretPortal)) {
+    // Use a higher priority than the FreedesktopSecretKeyProvider.
+    providers.emplace_back(
+        /*precedence=*/15u,
+        std::make_unique<os_crypt_async::SecretPortalKeyProvider>(
+            local_state(),
+            base::FeatureList::IsEnabled(
+                features::kSecretPortalKeyProviderUseForEncryption)));
+  }
+
+  auto freedesktop_config =
+      os_crypt_async::FreedesktopSecretKeyProvider::GetDefaultConfig();
+
+  const std::string app_name = electron::GetApplicationName();
+  freedesktop_config.app_name = app_name;
+  freedesktop_config.kwallet_folder = app_name + " Keys";
+  freedesktop_config.key_name = app_name + " Safe Storage";
+
+  providers.emplace_back(
+      /*precedence=*/10u,
+      std::make_unique<os_crypt_async::FreedesktopSecretKeyProvider>(
+          password_store, electron::GetApplicationName(), freedesktop_config,
+          nullptr));
+#endif  // BUILDFLAG(IS_LINUX)
+
+#if BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_MAC)
+  // On other POSIX systems, this is the only key provider. On Linux, it is used
+  // as a fallback.
+  providers.emplace_back(
+      /*precedence=*/5u, std::make_unique<os_crypt_async::PosixKeyProvider>());
+#endif  // BUILDFLAG(IS_POSIX) && !BUILDFLAG(IS_MAC)
+
+#if BUILDFLAG(IS_MAC)
+  if (base::FeatureList::IsEnabled(features::kUseKeychainKeyProvider)) {
+    providers.emplace_back(
+        /*precedence=*/10u,
+        std::make_unique<os_crypt_async::KeychainKeyProvider>());
+  }
+#endif  // BUILDFLAG(IS_MAC)
+
+  os_crypt_async_ =
+      std::make_unique<os_crypt_async::OSCryptAsync>(std::move(providers));
+}
+
+void BrowserProcessImpl::CreateMetricsServiceClient() {
+  metrics_service_client_ =
+      std::make_unique<electron::ElectronMetricsServiceClient>();
 }

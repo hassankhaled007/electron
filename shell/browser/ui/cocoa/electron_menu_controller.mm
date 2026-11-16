@@ -12,7 +12,6 @@
 #include "base/functional/callback.h"
 #include "base/strings/sys_string_conversions.h"
 #include "base/strings/utf_string_conversions.h"
-#include "content/public/browser/browser_task_traits.h"
 #include "content/public/browser/browser_thread.h"
 #include "net/base/apple/url_conversions.h"
 #include "shell/browser/mac/electron_application.h"
@@ -117,6 +116,25 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
   return result;
 }
 
+// Convert a Badge to an NSMenuItemBadge, or nil if it has nothing to show.
+NSMenuItemBadge* CreateBadge(const electron::ElectronMenuModel::Badge& badge)
+    API_AVAILABLE(macos(14.0)) {
+  if (badge.type == "none") {
+    if (!badge.content)
+      return nil;
+    return [[NSMenuItemBadge alloc]
+        initWithString:base::SysUTF8ToNSString(*badge.content)];
+  }
+  const NSInteger count = badge.count.value_or(0);
+  if (badge.type == "alerts")
+    return [NSMenuItemBadge alertsWithCount:count];
+  if (badge.type == "updates")
+    return [NSMenuItemBadge updatesWithCount:count];
+  if (badge.type == "new-items")
+    return [NSMenuItemBadge newItemsWithCount:count];
+  return nil;
+}
+
 }  // namespace
 
 // This class stores a base::WeakPtr<electron::ElectronMenuModel> as an
@@ -217,8 +235,12 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
 
 - (void)cancel {
   if (isMenuOpen_) {
-    [menu_ cancelTracking];
+    // Clear the flag first so that a -menuDidClose: delivered during the
+    // cancel is ignored and the close is only reported once, from here.
     isMenuOpen_ = NO;
+    // Cancel without the fade-out animation: while it runs, a following
+    // -popUpMenuPositioningItem:atLocation:inView: silently shows nothing.
+    [menu_ cancelTrackingWithoutAnimation];
     if (model_)
       model_->MenuWillClose();
     if (!popupCloseCallback.is_null()) {
@@ -258,9 +280,11 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
 
 // Empties the source menu items to the destination.
 - (void)moveMenuItems:(NSMenu*)source to:(NSMenu*)destination {
-  const NSInteger count = [source numberOfItems];
+  const NSInteger count = source.numberOfItems;
   for (NSInteger index = 0; index < count; index++) {
     NSMenuItem* removedItem = [source itemAtIndex:0];
+    if (!removedItem)
+      return;
     [source removeItemAtIndex:0];
     [destination addItem:removedItem];
   }
@@ -269,25 +293,25 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
 // Replaces the item's submenu instance with the singleton recent documents
 // menu. Previously replaced menu items will be recovered.
 - (void)replaceSubmenuShowingRecentDocuments:(NSMenuItem*)item {
-  NSMenu* recentDocumentsMenu = [recentDocumentsMenuItem_ submenu];
+  NSMenu* recentDocumentsMenu = recentDocumentsMenuItem_.submenu;
 
   // Remove menu items in recent documents back to swap menu
   [self moveMenuItems:recentDocumentsMenu to:recentDocumentsMenuSwap_];
   // Swap back the submenu
-  [recentDocumentsMenuItem_ setSubmenu:recentDocumentsMenuSwap_];
+  recentDocumentsMenuItem_.submenu = recentDocumentsMenuSwap_;
 
   // Retain the item's submenu for a future recovery
-  recentDocumentsMenuSwap_ = [item submenu];
+  recentDocumentsMenuSwap_ = item.submenu;
 
   // Repopulate with items from the submenu to be replaced
   [self moveMenuItems:recentDocumentsMenuSwap_ to:recentDocumentsMenu];
   // Update the submenu's title
-  [recentDocumentsMenu setTitle:[recentDocumentsMenuSwap_ title]];
+  recentDocumentsMenu.title = recentDocumentsMenuSwap_.title;
   // Replace submenu
-  [item setSubmenu:recentDocumentsMenu];
+  item.submenu = recentDocumentsMenu;
 
-  DCHECK_EQ([item action], @selector(submenuAction:));
-  DCHECK_EQ([item target], recentDocumentsMenu);
+  DCHECK_EQ(item.action, @selector(submenuAction:));
+  DCHECK_EQ(item.target, recentDocumentsMenu);
 
   // Remember the new menu item that carries the recent documents menu
   recentDocumentsMenuItem_ = item;
@@ -300,10 +324,18 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
     return MakeEmptySubmenu();
   NSMenu* menu = [[NSMenu alloc] init];
   menu.autoenablesItems = NO;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  // +[NSSharingService sharingServicesForItems:] is deprecated in macOS 13,
+  // but the replacement is not adequate for our usage. It creates a menu item
+  // that shows a picker that we're not in control of, and conflicts with
+  // existing menu items. See https://crbug.com/40846334 for the investigation
+  // into the replacement API and why it can't be used.
   NSArray* services = [NSSharingService sharingServicesForItems:items];
+#pragma clang diagnostic pop
   for (NSSharingService* service in services)
     [menu addItem:[self menuItemForService:service withItems:items]];
-  [menu setDelegate:self];
+  menu.delegate = self;
   return menu;
 }
 
@@ -313,9 +345,9 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
   NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:service.menuItemTitle
                                                 action:@selector(performShare:)
                                          keyEquivalent:@""];
-  [item setTarget:self];
-  [item setImage:service.image];
-  [item setRepresentedObject:@{@"service" : service, @"items" : items}];
+  item.target = self;
+  item.image = service.image;
+  item.representedObject = @{@"service" : service, @"items" : items};
   return item;
 }
 
@@ -323,11 +355,17 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
                           fromModel:(electron::ElectronMenuModel*)model {
   std::u16string label16 = model->GetLabelAt(index);
   auto rawSecondaryLabel = model->GetSecondaryLabelAt(index);
+  std::u16string accessibility_label16 = model->GetAccessibilityLabelAt(index);
   NSString* label = l10n_util::FixUpWindowsStyleLabel(label16);
 
   NSMenuItem* item = [[NSMenuItem alloc] initWithTitle:label
                                                 action:@selector(itemSelected:)
                                          keyEquivalent:@""];
+  if (!accessibility_label16.empty()) {
+    NSString* accessibility_label =
+        base::SysUTF16ToNSString(accessibility_label16);
+    item.accessibilityLabel = accessibility_label;
+  }
 
   if (!rawSecondaryLabel.empty()) {
     if (@available(macOS 14.4, *)) {
@@ -351,10 +389,16 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
   // If the menu item has an icon, set it.
   ui::ImageModel icon = model->GetIconAt(index);
   if (icon.IsImage())
-    [item setImage:icon.GetImage().ToNSImage()];
+    item.image = icon.GetImage().ToNSImage();
 
   std::u16string toolTip = model->GetToolTipAt(index);
-  [item setToolTip:base::SysUTF16ToNSString(toolTip)];
+  item.toolTip = base::SysUTF16ToNSString(toolTip);
+
+  if (@available(macOS 14, *)) {
+    electron::ElectronMenuModel::Badge badge;
+    if (model->GetBadgeAt(index, &badge))
+      item.badge = CreateBadge(badge);
+  }
 
   if (role == u"services") {
     std::u16string title = u"Services";
@@ -398,7 +442,7 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
     submenu.delegate = self;
 
     // Set submenu's role.
-    if ((role == u"window" || role == u"windowmenu") && [submenu numberOfItems])
+    if ((role == u"window" || role == u"windowmenu") && submenu.numberOfItems)
       [NSApp setWindowsMenu:submenu];
     else if (role == u"help")
       [NSApp setHelpMenu:submenu];
@@ -463,6 +507,14 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
   return item;
 }
 
+// Called by AppKit before displaying a menu and when a key equivalent is
+// pressed. This ensures menu item states (enabled, checked, hidden) are
+// refreshed from the model even when the menu is closed, which is necessary
+// since we set autoenablesItems = NO.
+- (void)menuNeedsUpdate:(NSMenu*)menu {
+  [self refreshMenuTree:menu];
+}
+
 - (void)applyStateToMenuItem:(NSMenuItem*)item {
   id represented = item.representedObject;
   if (!represented)
@@ -470,7 +522,6 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
 
   if (![represented
           isKindOfClass:[WeakPtrToElectronMenuModelAsNSObject class]]) {
-    NSLog(@"representedObject is not a WeakPtrToElectronMenuModelAsNSObject");
     return;
   }
 
@@ -484,14 +535,61 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
   if (index < 0 || index >= count)
     return;
 
-  item.hidden = !model->IsVisibleAt(index);
+  // When the menu is closed, we need to allow shortcuts to be triggered even
+  // if the menu item is disabled. So we only disable the menu item when the
+  // menu is open. This matches behavior of |validateUserInterfaceItem|.
   item.enabled = model->IsEnabledAt(index);
+  item.hidden = !model->IsVisibleAt(index);
   item.state = model->IsItemCheckedAt(index) ? NSControlStateValueOn
                                              : NSControlStateValueOff;
+  std::u16string label16 = model->GetLabelAt(index);
+  std::u16string accessibility_label16 = model->GetAccessibilityLabelAt(index);
+  NSString* label = l10n_util::FixUpWindowsStyleLabel(label16);
+  item.title = label;
+  if (!accessibility_label16.empty()) {
+    NSString* accessibility_label =
+        base::SysUTF16ToNSString(accessibility_label16);
+    item.accessibilityLabel = accessibility_label;
+  }
+
+  std::u16string rawSecondaryLabel = model->GetSecondaryLabelAt(index);
+  if (!rawSecondaryLabel.empty()) {
+    if (@available(macOS 14.4, *)) {
+      NSString* secondary_label =
+          l10n_util::FixUpWindowsStyleLabel(rawSecondaryLabel);
+      item.subtitle = secondary_label;
+    }
+  }
+
+  ui::ImageModel icon = model->GetIconAt(index);
+  if (icon.IsImage()) {
+    item.image = icon.GetImage().ToNSImage();
+  } else {
+    item.image = nil;
+    // Since macOS Tahoe introduced default menu icons, some role-based
+    // menu items receive a system-provided icon. When we clear `item.image`
+    // (set it to nil) AppKit may remove or fail to restore the role's
+    // default icon. To ensure the correct icon is shown, we force AppKit to
+    // refresh the item by reassigning its action selector (clear then set),
+    // which causes the menu item to update its displayed icon.
+    std::u16string role = model->GetRoleAt(index);
+    if (!role.empty()) {
+      for (const Role& pair : kRolesMap) {
+        if (role == base::ASCIIToUTF16(pair.role)) {
+          item.action = nil;
+          item.action = pair.selector;
+          break;
+        }
+      }
+    }
+  }
+
+  if (@available(macOS 14, *)) {
+    electron::ElectronMenuModel::Badge badge;
+    item.badge = model->GetBadgeAt(index, &badge) ? CreateBadge(badge) : nil;
+  }
 }
 
-// Recursively refreshes the menu tree starting from |menu|, applying the
-// model state to each menu item.
 - (void)refreshMenuTree:(NSMenu*)menu {
   for (NSMenuItem* item in menu.itemArray) {
     [self applyStateToMenuItem:item];
@@ -557,7 +655,14 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
 
 - (void)menuWillOpen:(NSMenu*)menu {
   isMenuOpen_ = YES;
-  [self refreshMenuTree:menu];
+
+  // macOS automatically injects a duplicate "Toggle Full Screen" menu item
+  // when we set menu.delegate on submenus. Remove hidden duplicates.
+  for (NSMenuItem* item in menu.itemArray) {
+    if (item.isHidden && item.action == @selector(toggleFullScreenMode:))
+      [menu removeItem:item];
+  }
+
   if (model_)
     model_->MenuWillShow();
 }
@@ -567,18 +672,25 @@ NSArray* ConvertSharingItemToNS(const SharingItem& item) {
   if (!isMenuOpen_)
     return;
 
-  bool has_close_cb = !popupCloseCallback.is_null();
-
   // There are two scenarios where we should emit menu-did-close:
   // 1. It's a popup and the top level menu is closed.
   // 2. It's an application menu, and the current menu's supermenu
   //    is the top-level menu.
+  bool has_close_cb = !popupCloseCallback.is_null();
+  bool should_emit_close = true;
   if (menu != menu_) {
-    if (has_close_cb || menu.supermenu != menu_)
-      return;
+    should_emit_close = !has_close_cb && menu.supermenu == menu_;
   }
 
+  [self refreshMenuTree:menu];
+
+  // Submenu's close event arrives before the top-level menu closes.
+  // Don't change isMenuOpen_ until the top-level one receives the close event.
+  if (!should_emit_close)
+    return;
+
   isMenuOpen_ = NO;
+
   if (model_)
     model_->MenuWillClose();
   // Post async task so that itemSelected runs before the close callback

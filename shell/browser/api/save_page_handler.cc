@@ -12,9 +12,8 @@
 
 namespace electron::api {
 
-SavePageHandler::SavePageHandler(content::WebContents* web_contents,
-                                 gin_helper::Promise<void> promise)
-    : web_contents_(web_contents), promise_(std::move(promise)) {}
+SavePageHandler::SavePageHandler(gin_helper::Promise<void> promise)
+    : promise_{std::move(promise)} {}
 
 SavePageHandler::~SavePageHandler() = default;
 
@@ -25,10 +24,16 @@ void SavePageHandler::OnDownloadCreated(content::DownloadManager* manager,
   item->AddObserver(this);
 }
 
-bool SavePageHandler::Handle(const base::FilePath& full_path,
-                             const content::SavePageType& save_type) {
+void SavePageHandler::Handle(const base::FilePath& full_path,
+                             const content::SavePageType& save_type,
+                             base::WeakPtr<content::WebContents> web_contents) {
+  if (!web_contents) {
+    promise_.RejectWithErrorMessage("Failed to save the page");
+    delete this;
+    return;
+  }
   auto* download_manager =
-      web_contents_->GetBrowserContext()->GetDownloadManager();
+      web_contents->GetBrowserContext()->GetDownloadManager();
   download_manager->AddObserver(this);
   // Chromium will create a 'foo_files' directory under the directory of saving
   // page 'foo.html' for holding other resource files of 'foo.html'.
@@ -36,7 +41,7 @@ bool SavePageHandler::Handle(const base::FilePath& full_path,
       full_path.RemoveExtension().BaseName().value() +
       FILE_PATH_LITERAL("_files"));
   bool result =
-      web_contents_->SavePage(full_path, saved_main_directory_path, save_type);
+      web_contents->SavePage(full_path, saved_main_directory_path, save_type);
   download_manager->RemoveObserver(this);
   // If initialization fails which means fail to create |DownloadItem|, we need
   // to delete the |SavePageHandler| instance to avoid memory-leak.
@@ -44,7 +49,6 @@ bool SavePageHandler::Handle(const base::FilePath& full_path,
     promise_.RejectWithErrorMessage("Failed to save the page");
     delete this;
   }
-  return result;
 }
 
 void SavePageHandler::OnDownloadUpdated(download::DownloadItem* item) {

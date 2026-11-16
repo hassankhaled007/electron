@@ -11,17 +11,20 @@
 
 #import <Cocoa/Cocoa.h>
 #import <CoreServices/CoreServices.h>
-#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
 #include "base/apple/foundation_util.h"
 #include "base/apple/scoped_cftyperef.h"
 #include "base/files/file_util.h"
+#include "base/functional/bind.h"
 #include "base/mac/mac_util.h"
+#include "base/run_loop.h"
 #include "base/strings/sys_string_conversions.h"
-#include "content/public/browser/browser_task_traits.h"
+#include "base/task/sequenced_task_runner.h"
 #include "content/public/browser/browser_thread.h"
 #include "electron/mas.h"
 #include "shell/browser/native_window.h"
+#include "shell/browser/native_window_mac_remote.h"
+#include "shell/common/electron_paths.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/promise.h"
@@ -30,7 +33,7 @@
 @interface PopUpButtonHandler : NSObject
 
 @property(nonatomic, weak) NSSavePanel* savePanel;
-@property(nonatomic, strong) NSArray* contentTypesList;
+@property(nonatomic, strong) NSArray* fileTypesList;
 
 - (instancetype)initWithPanel:(NSSavePanel*)panel
                  andTypesList:(NSArray*)typesList;
@@ -41,14 +44,14 @@
 @implementation PopUpButtonHandler
 
 @synthesize savePanel;
-@synthesize contentTypesList;
+@synthesize fileTypesList;
 
 - (instancetype)initWithPanel:(NSSavePanel*)panel
                  andTypesList:(NSArray*)typesList {
   self = [super init];
   if (self) {
     [self setSavePanel:panel];
-    [self setContentTypesList:typesList];
+    [self setFileTypesList:typesList];
   }
   return self;
 }
@@ -56,19 +59,17 @@
 - (void)selectFormat:(id)sender {
   NSPopUpButton* button = (NSPopUpButton*)sender;
   NSInteger selectedItemIndex = [button indexOfSelectedItem];
-  NSArray* list = [self contentTypesList];
-  NSArray* content_types = [list objectAtIndex:selectedItemIndex];
+  NSArray* list = [self fileTypesList];
+  NSArray* fileTypes = [list objectAtIndex:selectedItemIndex];
 
-  __block BOOL allowAllFiles = NO;
-  [content_types
-      enumerateObjectsUsingBlock:^(UTType* type, NSUInteger idx, BOOL* stop) {
-        if ([[type preferredFilenameExtension] isEqual:@"*"]) {
-          allowAllFiles = YES;
-          *stop = YES;
-        }
-      }];
-
-  [[self savePanel] setAllowedContentTypes:allowAllFiles ? @[] : content_types];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  // If we meet a '*' file extension, we allow all file types.
+  if ([fileTypes count] == 0 || [fileTypes containsObject:@"*"])
+    [[self savePanel] setAllowedFileTypes:nil];
+  else
+    [[self savePanel] setAllowedFileTypes:fileTypes];
+#pragma clang diagnostic pop
 }
 
 @end
@@ -105,7 +106,7 @@ void SetAllowedFileTypes(NSSavePanel* dialog, const Filters& filters) {
 
   // Create array to keep file types and their name.
   for (const Filter& filter : filters) {
-    NSMutableOrderedSet* content_types_set =
+    NSMutableOrderedSet* file_type_set =
         [NSMutableOrderedSet orderedSetWithCapacity:filters.size()];
     [filter_names addObject:@(filter.first.c_str())];
 
@@ -119,52 +120,41 @@ void SetAllowedFileTypes(NSSavePanel* dialog, const Filters& filters) {
         ext.erase(0, pos + 1);
       }
 
-      if (ext == "*") {
-        [content_types_set addObject:[UTType typeWithFilenameExtension:@"*"]];
-        break;
-      } else if (ext == "app") {
-        // This handles a bug on macOS where the "app" extension by default
-        // maps to "com.apple.application-file", which is for an Application
-        // file (older single-file carbon based apps), and not modern
-        // Application Bundles (multi file packages as you'd see for all modern
-        // applications).
-        UTType* superType =
-            [UTType typeWithIdentifier:@"com.apple.application-bundle"];
-        if (UTType* utt = [UTType typeWithFilenameExtension:@"app"
-                                           conformingToType:superType]) {
-          [content_types_set addObject:utt];
-        }
-      } else {
-        if (UTType* utt = [UTType typeWithFilenameExtension:@(ext.c_str())])
-          [content_types_set addObject:utt];
-      }
+      [file_type_set addObject:@(ext.c_str())];
     }
 
-    [file_types_list addObject:content_types_set];
+    [file_types_list addObject:[file_type_set array]];
   }
 
-  NSArray* content_types = [file_types_list objectAtIndex:0];
+  // Passing empty array to setAllowedFileTypes will cause exception.
+  NSArray* file_types = nil;
+  NSUInteger count = [file_types_list count];
+  if (count > 0) {
+    file_types = [[file_types_list objectAtIndex:0] allObjects];
+    // If we meet a '*' file extension, we allow all the file types and no
+    // need to set the specified file types.
+    if ([file_types count] == 0 || [file_types containsObject:@"*"])
+      file_types = nil;
+  }
 
-  __block BOOL allowAllFiles = NO;
-  [content_types
-      enumerateObjectsUsingBlock:^(UTType* type, NSUInteger idx, BOOL* stop) {
-        if ([[type preferredFilenameExtension] isEqual:@"*"]) {
-          allowAllFiles = YES;
-          *stop = YES;
-        }
-      }];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  [dialog setAllowedFileTypes:file_types];
+#pragma clang diagnostic pop
 
-  [dialog setAllowedContentTypes:allowAllFiles ? @[] : content_types];
-
-  // Don't add file format picker.
-  if ([file_types_list count] <= 1)
-    return;
+  if (count <= 1)
+    return;  // don't add file format picker
 
   // Add file format picker.
   ElectronAccessoryView* accessoryView = [[ElectronAccessoryView alloc]
       initWithFrame:NSMakeRect(0.0, 0.0, 200, 32.0)];
-  NSTextField* label =
-      [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 60, 22)];
+  NSRect labelFrame = NSMakeRect(0, 0, 60, 22);
+  NSRect popupButtonFrame = NSMakeRect(50.0, 2, 140, 22.0);
+  if (@available(macOS 26.0, *)) {
+    labelFrame.origin.y = 4;
+    popupButtonFrame.origin.y = 6;
+  }
+  NSTextField* label = [[NSTextField alloc] initWithFrame:labelFrame];
 
   [label setEditable:NO];
   [label setStringValue:@"Format:"];
@@ -173,8 +163,7 @@ void SetAllowedFileTypes(NSSavePanel* dialog, const Filters& filters) {
   [label setDrawsBackground:NO];
 
   NSPopUpButton* popupButton =
-      [[NSPopUpButton alloc] initWithFrame:NSMakeRect(50.0, 2, 140, 22.0)
-                                 pullsDown:NO];
+      [[NSPopUpButton alloc] initWithFrame:popupButtonFrame pullsDown:NO];
   PopUpButtonHandler* popUpButtonHandler =
       [[PopUpButtonHandler alloc] initWithPanel:dialog
                                    andTypesList:file_types_list];
@@ -205,14 +194,18 @@ void SetupDialog(NSSavePanel* dialog, const DialogSettings& settings) {
 
   [dialog setShowsTagField:settings.shows_tag_field];
 
+  base::FilePath default_path = settings.default_path.empty()
+                                    ? electron::GetDefaultPath()
+                                    : settings.default_path;
+
   NSString* default_dir = nil;
   NSString* default_filename = nil;
-  if (!settings.default_path.empty()) {
+  if (!default_path.empty()) {
     electron::ScopedAllowBlockingForElectron allow_blocking;
-    if (base::DirectoryExists(settings.default_path)) {
-      default_dir = base::SysUTF8ToNSString(settings.default_path.value());
+    if (base::DirectoryExists(default_path)) {
+      default_dir = base::SysUTF8ToNSString(default_path.value());
     } else {
-      if (settings.default_path.IsAbsolute()) {
+      if (default_path.IsAbsolute()) {
         default_dir =
             base::SysUTF8ToNSString(settings.default_path.DirName().value());
       }
@@ -265,16 +258,32 @@ void SetupSaveDialogForProperties(NSSavePanel* dialog, int properties) {
     [dialog setTreatsFilePackagesAsDirectories:YES];
 }
 
+// The window the dialog is a sheet of, if any. A window in an app shim has no
+// NSWindow in this process that could take one.
+NSWindow* SheetParent(const DialogSettings& settings) {
+  if (!settings.parent_window || settings.force_detached ||
+      settings.parent_window->IsInAppShim()) {
+    return nil;
+  }
+  return settings.parent_window->GetNativeWindow().GetNativeNSWindow();
+}
+
+// The window in an app shim that shows the dialog as its sheet, if any.
+electron::NativeWindowMacRemote* ShimParent(const DialogSettings& settings) {
+  if (!settings.parent_window || settings.force_detached ||
+      !settings.parent_window->IsInAppShim()) {
+    return nullptr;
+  }
+  return static_cast<electron::NativeWindowMacRemote*>(settings.parent_window);
+}
+
 // Run modal dialog with parent window and return user's choice.
 int RunModalDialog(NSSavePanel* dialog, const DialogSettings& settings) {
   __block int chosen = NSModalResponseCancel;
-  if (!settings.parent_window || !settings.parent_window->GetNativeWindow() ||
-      settings.force_detached) {
+  NSWindow* window = SheetParent(settings);
+  if (!window) {
     chosen = [dialog runModal];
   } else {
-    NSWindow* window =
-        settings.parent_window->GetNativeWindow().GetNativeNSWindow();
-
     [dialog beginSheetModalForWindow:window
                    completionHandler:^(NSInteger c) {
                      chosen = c;
@@ -288,10 +297,14 @@ int RunModalDialog(NSSavePanel* dialog, const DialogSettings& settings) {
 
 // Create bookmark data and serialise it into a base64 string.
 std::string GetBookmarkDataFromNSURL(NSURL* url) {
+  NSString* path = [url path];
+  if (!path)
+    return "";
+
   // Create the file if it doesn't exist (necessary for NSSavePanel options).
   NSFileManager* defaultManager = [NSFileManager defaultManager];
-  if (![defaultManager fileExistsAtPath:[url path]]) {
-    [defaultManager createFileAtPath:[url path] contents:nil attributes:nil];
+  if (![defaultManager fileExistsAtPath:path]) {
+    [defaultManager createFileAtPath:path contents:nil attributes:nil];
   }
 
   NSError* error = nil;
@@ -321,6 +334,8 @@ void ReadDialogPathsWithBookmarks(NSOpenPanel* dialog,
       continue;
 
     NSString* path = [url path];
+    if (!path)
+      continue;
 
     // There's a bug in macOS where despite a request to disallow file
     // selection, files/packages can be selected. If file selection
@@ -367,11 +382,60 @@ void ResolvePromiseInNextTick(gin_helper::Promise<v8::Local<v8::Value>> promise,
           std::move(promise), v8::Global<v8::Value>(promise.isolate(), value)));
 }
 
+// Waits, in a nested loop, for a dialog that a shim's process is showing.
+template <typename Result>
+Result WaitForShimDialog(
+    base::OnceCallback<void(base::OnceCallback<void(bool, const Result&)>)>
+        show) {
+  base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);
+  Result result;
+  std::move(show).Run(base::BindOnce(
+      [](base::OnceClosure quit, Result* out, bool canceled,
+         const Result& value) {
+        if (!canceled)
+          *out = value;
+        std::move(quit).Run();
+      },
+      run_loop.QuitClosure(), &result));
+  run_loop.Run();
+  return result;
+}
+
+gin_helper::Dictionary OpenDialogResult(
+    v8::Isolate* isolate,
+    bool canceled,
+    const std::vector<base::FilePath>& paths,
+    const std::vector<std::string>& bookmarks) {
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+  dict.Set("canceled", canceled);
+  dict.Set("filePaths", paths);
+#if IS_MAS_BUILD()
+  dict.Set("bookmarks", bookmarks);
+#endif
+  return dict;
+}
+
+gin_helper::Dictionary SaveDialogResult(v8::Isolate* isolate,
+                                        bool canceled,
+                                        const base::FilePath& path) {
+  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
+  dict.Set("canceled", canceled);
+  dict.Set("filePath", path);
+  return dict;
+}
+
 }  // namespace
 
 bool ShowOpenDialogSync(const DialogSettings& settings,
                         std::vector<base::FilePath>* paths) {
   DCHECK(paths);
+  if (auto* shim_parent = ShimParent(settings)) {
+    *paths = WaitForShimDialog<std::vector<base::FilePath>>(
+        base::BindOnce(&electron::NativeWindowMacRemote::ShowOpenDialog,
+                       base::Unretained(shim_parent), settings));
+    return !paths->empty();
+  }
+
   NSOpenPanel* dialog = [NSOpenPanel openPanel];
 
   SetupDialog(dialog, settings);
@@ -390,35 +454,41 @@ void OpenDialogCompletion(int chosen,
                           bool security_scoped_bookmarks,
                           gin_helper::Promise<gin_helper::Dictionary> promise) {
   v8::HandleScope scope(promise.isolate());
-  auto dict = gin_helper::Dictionary::CreateEmpty(promise.isolate());
-  if (chosen == NSModalResponseCancel) {
-    dict.Set("canceled", true);
-    dict.Set("filePaths", std::vector<base::FilePath>());
+  std::vector<base::FilePath> paths;
+  std::vector<std::string> bookmarks;
+  if (chosen != NSModalResponseCancel) {
 #if IS_MAS_BUILD()
-    dict.Set("bookmarks", std::vector<std::string>());
-#endif
-  } else {
-    std::vector<base::FilePath> paths;
-    dict.Set("canceled", false);
-#if IS_MAS_BUILD()
-    std::vector<std::string> bookmarks;
     if (security_scoped_bookmarks)
       ReadDialogPathsWithBookmarks(dialog, &paths, &bookmarks);
     else
       ReadDialogPaths(dialog, &paths);
-    dict.Set("filePaths", paths);
-    dict.Set("bookmarks", bookmarks);
 #else
     ReadDialogPaths(dialog, &paths);
-    dict.Set("filePaths", paths);
 #endif
   }
-  ResolvePromiseInNextTick(promise.As<v8::Local<v8::Value>>(),
-                           dict.GetHandle());
+  ResolvePromiseInNextTick(
+      promise.As<v8::Local<v8::Value>>(),
+      OpenDialogResult(promise.isolate(), chosen == NSModalResponseCancel,
+                       paths, bookmarks)
+          .GetHandle());
 }
 
 void ShowOpenDialog(const DialogSettings& settings,
                     gin_helper::Promise<gin_helper::Dictionary> promise) {
+  if (auto* shim_parent = ShimParent(settings)) {
+    shim_parent->ShowOpenDialog(
+        settings,
+        base::BindOnce(
+            [](gin_helper::Promise<gin_helper::Dictionary> promise,
+               bool canceled, const std::vector<base::FilePath>& paths) {
+              v8::HandleScope scope(promise.isolate());
+              promise.Resolve(
+                  OpenDialogResult(promise.isolate(), canceled, paths, {}));
+            },
+            std::move(promise)));
+    return;
+  }
+
   NSOpenPanel* dialog = [NSOpenPanel openPanel];
 
   SetupDialog(dialog, settings);
@@ -430,26 +500,59 @@ void ShowOpenDialog(const DialogSettings& settings,
 
   __block gin_helper::Promise<gin_helper::Dictionary> p = std::move(promise);
 
-  if (!settings.parent_window || !settings.parent_window->GetNativeWindow() ||
-      settings.force_detached) {
-    [dialog beginWithCompletionHandler:^(NSInteger chosen) {
-      OpenDialogCompletion(chosen, dialog, security_scoped_bookmarks,
-                           std::move(p));
-    }];
-  } else {
-    NSWindow* window =
-        settings.parent_window->GetNativeWindow().GetNativeNSWindow();
+  if (NSWindow* window = SheetParent(settings)) {
     [dialog
         beginSheetModalForWindow:window
                completionHandler:^(NSInteger chosen) {
                  OpenDialogCompletion(chosen, dialog, security_scoped_bookmarks,
                                       std::move(p));
                }];
+  } else {
+    [dialog beginWithCompletionHandler:^(NSInteger chosen) {
+      OpenDialogCompletion(chosen, dialog, security_scoped_bookmarks,
+                           std::move(p));
+    }];
   }
+}
+
+void ShowOpenDialogForNSWindow(const DialogSettings& settings,
+                               gfx::NativeWindow window,
+                               OpenDialogCallback callback) {
+  NSOpenPanel* dialog = [NSOpenPanel openPanel];
+
+  SetupDialog(dialog, settings);
+  SetupOpenDialogForProperties(dialog, settings.properties);
+
+  __block OpenDialogCallback cb = std::move(callback);
+  // A copy is needed: the block below would capture a reference by reference.
+  // NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
+  scoped_refptr<base::SequencedTaskRunner> task_runner =
+      base::SequencedTaskRunner::GetCurrentDefault();
+  [dialog
+      beginSheetModalForWindow:window.GetNativeNSWindow()
+             completionHandler:^(NSInteger chosen) {
+               std::vector<base::FilePath> paths;
+               if (chosen != NSModalResponseCancel)
+                 ReadDialogPaths(dialog, &paths);
+               // Not from inside the panel's own transaction.
+               task_runner->PostTask(
+                   FROM_HERE, base::BindOnce(std::move(cb),
+                                             chosen == NSModalResponseCancel,
+                                             std::move(paths)));
+             }];
 }
 
 std::optional<base::FilePath> ShowSaveDialogSync(
     const DialogSettings& settings) {
+  if (auto* shim_parent = ShimParent(settings)) {
+    base::FilePath path = WaitForShimDialog<base::FilePath>(
+        base::BindOnce(&electron::NativeWindowMacRemote::ShowSaveDialog,
+                       base::Unretained(shim_parent), settings));
+    if (path.empty())
+      return {};
+    return path;
+  }
+
   NSSavePanel* dialog = [NSSavePanel savePanel];
 
   SetupDialog(dialog, settings);
@@ -492,6 +595,19 @@ void SaveDialogCompletion(int chosen,
 
 void ShowSaveDialog(const DialogSettings& settings,
                     gin_helper::Promise<gin_helper::Dictionary> promise) {
+  if (auto* shim_parent = ShimParent(settings)) {
+    shim_parent->ShowSaveDialog(
+        settings, base::BindOnce(
+                      [](gin_helper::Promise<gin_helper::Dictionary> promise,
+                         bool canceled, const base::FilePath& path) {
+                        v8::HandleScope scope(promise.isolate());
+                        promise.Resolve(SaveDialogResult(promise.isolate(),
+                                                         canceled, path));
+                      },
+                      std::move(promise)));
+    return;
+  }
+
   NSSavePanel* dialog = [NSSavePanel savePanel];
 
   SetupDialog(dialog, settings);
@@ -504,22 +620,46 @@ void ShowSaveDialog(const DialogSettings& settings,
 
   __block gin_helper::Promise<gin_helper::Dictionary> p = std::move(promise);
 
-  if (!settings.parent_window || !settings.parent_window->GetNativeWindow() ||
-      settings.force_detached) {
-    [dialog beginWithCompletionHandler:^(NSInteger chosen) {
-      SaveDialogCompletion(chosen, dialog, security_scoped_bookmarks,
-                           std::move(p));
-    }];
-  } else {
-    NSWindow* window =
-        settings.parent_window->GetNativeWindow().GetNativeNSWindow();
+  if (NSWindow* window = SheetParent(settings)) {
     [dialog
         beginSheetModalForWindow:window
                completionHandler:^(NSInteger chosen) {
                  SaveDialogCompletion(chosen, dialog, security_scoped_bookmarks,
                                       std::move(p));
                }];
+  } else {
+    [dialog beginWithCompletionHandler:^(NSInteger chosen) {
+      SaveDialogCompletion(chosen, dialog, security_scoped_bookmarks,
+                           std::move(p));
+    }];
   }
+}
+
+void ShowSaveDialogForNSWindow(const DialogSettings& settings,
+                               gfx::NativeWindow window,
+                               SaveDialogCallback callback) {
+  NSSavePanel* dialog = [NSSavePanel savePanel];
+
+  SetupDialog(dialog, settings);
+  SetupSaveDialogForProperties(dialog, settings.properties);
+  [dialog setCanSelectHiddenExtension:YES];
+
+  __block SaveDialogCallback cb = std::move(callback);
+  // A copy is needed: the block below would capture a reference by reference.
+  // NOLINTNEXTLINE(performance-unnecessary-copy-initialization)
+  scoped_refptr<base::SequencedTaskRunner> task_runner =
+      base::SequencedTaskRunner::GetCurrentDefault();
+  [dialog
+      beginSheetModalForWindow:window.GetNativeNSWindow()
+             completionHandler:^(NSInteger chosen) {
+               base::FilePath path;
+               if (chosen != NSModalResponseCancel && [[dialog URL] isFileURL])
+                 path = base::FilePath(
+                     base::SysNSStringToUTF8([[dialog URL] path]));
+               task_runner->PostTask(FROM_HERE,
+                                     base::BindOnce(std::move(cb), path.empty(),
+                                                    std::move(path)));
+             }];
 }
 
 }  // namespace file_dialog

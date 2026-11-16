@@ -30,7 +30,6 @@
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
 #include "shell/common/gin_helper/promise.h"
-#include "shell/common/options_switches.h"
 #include "shell/common/thread_restrictions.h"
 
 #if BUILDFLAG(IS_WIN)
@@ -268,14 +267,14 @@ void ElectronDownloadManagerDelegate::OnDownloadPathGenerated(
     gin_helper::Promise<gin_helper::Dictionary> dialog_promise(isolate);
     auto dialog_callback = base::BindOnce(
         &ElectronDownloadManagerDelegate::OnDownloadSaveDialogDone,
-        base::Unretained(this), download_guid, std::move(callback));
+        weak_ptr_factory_.GetWeakPtr(), download_guid, std::move(callback));
 
     std::ignore = dialog_promise.Then(std::move(dialog_callback));
     file_dialog::ShowSaveDialog(settings, std::move(dialog_promise));
   } else {
     download::DownloadTargetInfo target_info;
     target_info.target_path = path;
-    target_info.intermediate_path = path;
+    target_info.intermediate_path = std::move(path);
     target_info.target_disposition =
         download::DownloadItem::TARGET_DISPOSITION_PROMPT;
     target_info.insecure_download_status = item->GetInsecureDownloadStatus();
@@ -317,7 +316,7 @@ void ElectronDownloadManagerDelegate::OnDownloadSaveDialogDone(
                    : download::DOWNLOAD_INTERRUPT_REASON_NONE;
   download::DownloadTargetInfo target_info;
   target_info.target_path = path;
-  target_info.intermediate_path = path;
+  target_info.intermediate_path = std::move(path);
   target_info.target_disposition =
       download::DownloadItem::TARGET_DISPOSITION_PROMPT;
   target_info.insecure_download_status = item->GetInsecureDownloadStatus();
@@ -349,7 +348,7 @@ bool ElectronDownloadManagerDelegate::DetermineDownloadTarget(
   if (!save_path.empty()) {
     download::DownloadTargetInfo target_info;
     target_info.target_path = save_path;
-    target_info.intermediate_path = save_path;
+    target_info.intermediate_path = std::move(save_path);
     std::move(*callback).Run(std::move(target_info));
     return true;
   }

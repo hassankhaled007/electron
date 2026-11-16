@@ -7,10 +7,10 @@ Electron does not support Profiles, so we need to patch it out of any
 code that we use.
 
 diff --git a/chrome/browser/pdf/chrome_pdf_stream_delegate.cc b/chrome/browser/pdf/chrome_pdf_stream_delegate.cc
-index 21d5ab99800c0830cc31ec4ebb24e3f05cd904d8..3f8f514519d6e4a0abe3690f5df35de8ffae6fd4 100644
+index ba02974778b98b83456e79ba62a9d6b30680039c..fd2e7a592cdeca42393d2e3f9f2a0e6ccfc20f68 100644
 --- a/chrome/browser/pdf/chrome_pdf_stream_delegate.cc
 +++ b/chrome/browser/pdf/chrome_pdf_stream_delegate.cc
-@@ -45,6 +45,7 @@ namespace {
+@@ -46,6 +46,7 @@ namespace {
  // hierarchy is: enterprise policy > user choice > finch experiment.
  bool ShouldEnableSkiaRenderer(content::WebContents* contents) {
    CHECK(contents);
@@ -18,7 +18,7 @@ index 21d5ab99800c0830cc31ec4ebb24e3f05cd904d8..3f8f514519d6e4a0abe3690f5df35de8
    const PrefService* prefs =
        Profile::FromBrowserContext(contents->GetBrowserContext())->GetPrefs();
  
-@@ -52,6 +53,7 @@ bool ShouldEnableSkiaRenderer(content::WebContents* contents) {
+@@ -53,6 +54,7 @@ bool ShouldEnableSkiaRenderer(content::WebContents* contents) {
    if (prefs->IsManagedPreference(prefs::kPdfUseSkiaRendererEnabled)) {
      return prefs->GetBoolean(prefs::kPdfUseSkiaRendererEnabled);
    }
@@ -26,7 +26,7 @@ index 21d5ab99800c0830cc31ec4ebb24e3f05cd904d8..3f8f514519d6e4a0abe3690f5df35de8
  
    //  When the enterprise policy is not set, use finch/feature flag choice.
    return base::FeatureList::IsEnabled(
-@@ -63,6 +65,7 @@ bool ShouldEnableSkiaRenderer(content::WebContents* contents) {
+@@ -64,6 +66,7 @@ bool ShouldEnableSkiaRenderer(content::WebContents* contents) {
  // priority hierarchy is: enterprise policy > user choice > finch experiment.
  bool ShouldEnableXfaForms(content::WebContents* contents) {
    CHECK(contents);
@@ -34,7 +34,7 @@ index 21d5ab99800c0830cc31ec4ebb24e3f05cd904d8..3f8f514519d6e4a0abe3690f5df35de8
    const PrefService* prefs =
        Profile::FromBrowserContext(contents->GetBrowserContext())->GetPrefs();
  
-@@ -70,6 +73,7 @@ bool ShouldEnableXfaForms(content::WebContents* contents) {
+@@ -71,6 +74,7 @@ bool ShouldEnableXfaForms(content::WebContents* contents) {
    if (prefs->IsManagedPreference(prefs::kPdfXfaFormsEnabled)) {
      return prefs->GetBoolean(prefs::kPdfXfaFormsEnabled);
    }
@@ -43,10 +43,19 @@ index 21d5ab99800c0830cc31ec4ebb24e3f05cd904d8..3f8f514519d6e4a0abe3690f5df35de8
    //  When the enterprise policy is not set, use finch/feature flag choice.
    return base::FeatureList::IsEnabled(chrome_pdf::features::kPdfXfaSupport);
 diff --git a/chrome/browser/pdf/pdf_extension_util.cc b/chrome/browser/pdf/pdf_extension_util.cc
-index 328abdd79d287225d0e6ec6becc455e169d6e5d0..10e5e702a43dbb70e13d00b48000e0b4cc974e7a 100644
+index 8de223abf069bde259ee49141e8ceda3400cea93..2c1ad81cf34a3796782507d22eed6f632479ad02 100644
 --- a/chrome/browser/pdf/pdf_extension_util.cc
 +++ b/chrome/browser/pdf/pdf_extension_util.cc
-@@ -248,10 +248,13 @@ bool IsPrintingEnabled(content::BrowserContext* context) {
+@@ -16,8 +16,6 @@
+ #include "build/branding_buildflags.h"
+ #include "build/build_config.h"
+ #include "chrome/browser/browser_process.h"
+-#include "chrome/browser/glic/public/glic_enabling.h"
+-#include "chrome/browser/glic/public/glic_provider_spec.h"
+ #include "chrome/browser/profiles/profile.h"
+ #include "chrome/common/chrome_features.h"
+ #include "chrome/common/extensions/api/pdf_viewer_private.h"
+@@ -267,10 +265,13 @@ bool IsPrintingEnabled(content::BrowserContext* context) {
  
  #if BUILDFLAG(ENABLE_PDF_INK2)
  bool IsPdfAnnotationsEnabledByPolicy(content::BrowserContext* context) {
@@ -58,63 +67,80 @@ index 328abdd79d287225d0e6ec6becc455e169d6e5d0..10e5e702a43dbb70e13d00b48000e0b4
 +#endif
 +  return true;
  }
- #endif  // BUILDFLAG(ENABLE_PDF_INK2)
  
-diff --git a/chrome/browser/profiles/profile_selections.cc b/chrome/browser/profiles/profile_selections.cc
-index bc0bad82ebcdceadc505e912ff27202b452fefab..6b77c57fccc4619a1df3b4ed661d2bdd60960228 100644
---- a/chrome/browser/profiles/profile_selections.cc
-+++ b/chrome/browser/profiles/profile_selections.cc
-@@ -13,6 +13,7 @@
- #endif  // BUILDFLAG(IS_CHROMEOS)
+ bool IsPdfInk2AnnotationsEnabled(content::BrowserContext* context) {
+@@ -376,7 +377,6 @@ base::DictValue GetStrings(PdfViewerContext context) {
  
- bool AreKeyedServicesDisabledForProfileByDefault(const Profile* profile) {
+ base::DictValue GetAdditionalData(content::WebContents* web_contents) {
+   content::BrowserContext* context = web_contents->GetBrowserContext();
+-  Profile* profile = Profile::FromBrowserContext(context);
+   // NOTE: This function should not include any data used for $i18n{}
+   // replacements. The i18n string resources should be added using GetStrings()
+   // above instead.
+@@ -386,10 +386,13 @@ base::DictValue GetAdditionalData(content::WebContents* web_contents) {
+                chrome_pdf::features::kPdfGetSaveDataInBlocks));
+   dict.Set("pdfGlicSummarizeEnabled",
+            ShouldShowGlicSummarizeButton(web_contents));
 +#if 0
-   // By default disable all services for System Profile.
-   // Even though having no services is also the default value for Guest Profile,
-   // this is not really the case in practice because a lot of Service Factories
-@@ -20,7 +21,7 @@ bool AreKeyedServicesDisabledForProfileByDefault(const Profile* profile) {
-   if (profile && profile->IsSystemProfile()) {
-     return true;
-   }
--
+   dict.Set("pdfGlicSummarizeUseLongButtonText",
+-           glic::GetGlicProviderSpec(profile)
++           glic::GetGlicProviderSpec(Profile::FromBrowserContext(context))
+                .GetPdfSummarizeFeatureParams()
+                .use_long_button_text);
 +#endif
-   return false;
- }
++  dict.Set("pdfGlicSummarizeUseLongButtonText", false);
+   dict.Set(
+       "pdfSearchifySaveEnabled",
+       base::FeatureList::IsEnabled(chrome_pdf::features::kPdfSearchifySave));
+@@ -534,11 +537,13 @@ bool ShouldShowGlicSummarizeButton(content::WebContents* web_contents) {
+     }
+   }
  
-@@ -104,6 +105,7 @@ ProfileSelections ProfileSelections::BuildRedirectedInIncognito() {
- }
- 
- Profile* ProfileSelections::ApplyProfileSelection(Profile* profile) const {
 +#if 0
-   CHECK(profile);
- 
-   ProfileSelection selection = GetProfileSelection(profile);
-@@ -119,6 +121,9 @@ Profile* ProfileSelections::ApplyProfileSelection(Profile* profile) const {
-     case ProfileSelection::kOffTheRecordOnly:
-       return profile->IsOffTheRecord() ? profile : nullptr;
+   Profile* profile =
+       Profile::FromBrowserContext(web_contents->GetBrowserContext());
+   if (!glic::GlicEnabling::IsPdfSummarizeEnabled(profile)) {
+     return false;
    }
-+#else
-+  return nullptr;
 +#endif
- }
  
- ProfileSelection ProfileSelections::GetProfileSelection(
+   auto* tab_interface = tabs::TabInterface::MaybeGetFromContents(web_contents);
+   if (tab_interface && !tab_interface->IsInNormalWindow()) {
+diff --git a/chrome/browser/pdf/pdf_help_bubble_handler_factory.cc b/chrome/browser/pdf/pdf_help_bubble_handler_factory.cc
+index 508a205d43192ddc05e777d4e91a66d3333d557d..67582c928dc4c1d71aa28373eb6f00ef2644eed5 100644
+--- a/chrome/browser/pdf/pdf_help_bubble_handler_factory.cc
++++ b/chrome/browser/pdf/pdf_help_bubble_handler_factory.cc
+@@ -39,10 +39,13 @@ DEFINE_CLASS_ELEMENT_IDENTIFIER_VALUE(PdfHelpBubbleHandlerFactory,
+ void PdfHelpBubbleHandlerFactory::Create(
+     content::RenderFrameHost* render_frame_host,
+     HelpFactoryPendingReceiver receiver) {
+-  bool is_feature_enabled =
++  bool is_feature_enabled = false;
++#if 0
++  is_feature_enabled =
+       glic::GetGlicProviderSpec(
+           Profile::FromBrowserContext(render_frame_host->GetBrowserContext()))
+           .SupportsFeature(glic::GlicFeature::kPdfSummarize);
++#endif
+ #if BUILDFLAG(ENABLE_PDF_INK2)
+   is_feature_enabled |=
+       base::FeatureList::IsEnabled(chrome_pdf::features::kPdfInk2);
 diff --git a/chrome/browser/spellchecker/spellcheck_service.cc b/chrome/browser/spellchecker/spellcheck_service.cc
-index 13d39ca423abc89e70f277ac06a8b1b1212dbeea..a13a50fd89a5085870a0b6e3a30fd025ca0cf386 100644
+index 89e865b5e487fec01e45b171d6bbe95efd63f292..06a8aae836d86d095a8d457573766d198d7992a8 100644
 --- a/chrome/browser/spellchecker/spellcheck_service.cc
 +++ b/chrome/browser/spellchecker/spellcheck_service.cc
-@@ -21,8 +21,10 @@
- #include "base/synchronization/waitable_event.h"
+@@ -25,8 +25,10 @@
+ #include "base/timer/elapsed_timer.h"
  #include "base/values.h"
  #include "build/build_config.h"
 +#if 0
  #include "chrome/browser/profiles/profile.h"
  #include "chrome/browser/profiles/profiles_state.h"
 +#endif
+ #include "chrome/browser/search/search.h"
  #include "chrome/browser/spellchecker/spellcheck_factory.h"
  #include "chrome/browser/spellchecker/spellcheck_hunspell_dictionary.h"
- #include "components/language/core/browser/pref_names.h"
-@@ -67,7 +69,10 @@ SpellcheckService::SpellCheckerBinder& GetSpellCheckerBinderOverride() {
+@@ -75,7 +77,10 @@ SpellcheckService::SpellCheckerBinder& GetSpellCheckerBinderOverride() {
  // Only record spelling-configuration metrics for profiles in which the user
  // can configure spelling.
  bool RecordSpellingConfigurationMetrics(content::BrowserContext* context) {
@@ -125,18 +151,17 @@ index 13d39ca423abc89e70f277ac06a8b1b1212dbeea..a13a50fd89a5085870a0b6e3a30fd025
  }
  
  }  // namespace
-diff --git a/chrome/browser/win/titlebar_config.cc b/chrome/browser/win/titlebar_config.cc
-index 7898ea88ca529660e52c1f9e2517d6f016b740a5..114046912999f4ca9d21f7d5859d14ecaaab9f56 100644
---- a/chrome/browser/win/titlebar_config.cc
-+++ b/chrome/browser/win/titlebar_config.cc
-@@ -12,8 +12,10 @@
- 
- bool ShouldBrowserCustomDrawTitlebar(BrowserView* browser_view) {
-   return !ShouldDefaultThemeUseMicaTitlebar() ||
+@@ -504,11 +509,13 @@ void SpellcheckService::InitForRenderer(content::RenderProcessHost* host) {
+       features::kInitialWebUIWithoutSpellCheck.Get()) {
+     return;
+   }
 +#if 0
-          !ThemeServiceFactory::GetForProfile(browser_view->GetProfile())
-               ->UsingSystemTheme() ||
+   if (base::FeatureList::IsEnabled(
+           features::kInitialWebUIWithoutSpellCheckForNtp) &&
+       host->GetUserData(search::kIsNTPProcessKey)) {
+     return;
+   }
 +#endif
-          (!browser_view->browser()->is_type_normal() &&
-           !browser_view->browser()->is_type_popup() &&
-           !browser_view->browser()->is_type_devtools());
+ 
+   CHECK_CURRENTLY_ON(BrowserThread::UI, base::NotFatalUntil::M163);
+ 

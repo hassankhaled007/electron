@@ -2,10 +2,8 @@
 // Use of this source code is governed by the MIT license that can be
 // found in the LICENSE file.
 
-#ifndef ELECTRON_SHELL_BROWSER_FILE_SYSTEM_ACCESS_ELECTRON_FILE_SYSTEM_ACCESS_PERMISSION_CONTEXT_H_
-#define ELECTRON_SHELL_BROWSER_FILE_SYSTEM_ACCESS_ELECTRON_FILE_SYSTEM_ACCESS_PERMISSION_CONTEXT_H_
-
-#include "shell/browser/file_system_access/file_system_access_permission_context.h"
+#ifndef ELECTRON_SHELL_BROWSER_FILE_SYSTEM_ACCESS_FILE_SYSTEM_ACCESS_PERMISSION_CONTEXT_H_
+#define ELECTRON_SHELL_BROWSER_FILE_SYSTEM_ACCESS_FILE_SYSTEM_ACCESS_PERMISSION_CONTEXT_H_
 
 #include <map>
 #include <memory>
@@ -57,19 +55,19 @@ class FileSystemAccessPermissionContext
   GetReadPermissionGrant(const url::Origin& origin,
                          const content::PathInfo& path,
                          HandleType handle_type,
-                         UserAction user_action) override;
+                         AccessTrigger access_trigger) override;
 
   scoped_refptr<content::FileSystemAccessPermissionGrant>
   GetWritePermissionGrant(const url::Origin& origin,
                           const content::PathInfo& path,
                           HandleType handle_type,
-                          UserAction user_action) override;
+                          AccessTrigger access_trigger) override;
 
   void ConfirmSensitiveEntryAccess(
       const url::Origin& origin,
       const content::PathInfo& path,
       HandleType handle_type,
-      UserAction user_action,
+      AccessTrigger access_trigger,
       content::GlobalRenderFrameHostId frame_id,
       base::OnceCallback<void(SensitiveEntryResult)> callback) override;
 
@@ -78,8 +76,7 @@ class FileSystemAccessPermissionContext
       content::GlobalRenderFrameHostId frame_id,
       base::OnceCallback<void(AfterWriteCheckResult)> callback) override;
 
-  bool IsFileTypeDangerous(const base::FilePath& path,
-                           const url::Origin& origin) override;
+  bool IsFileTypeDangerous(const base::FilePath& path) override;
   base::expected<void, std::string> CanShowFilePicker(
       content::RenderFrameHost* rfh) override;
   bool CanObtainReadPermission(const url::Origin& origin) override;
@@ -116,15 +113,8 @@ class FileSystemAccessPermissionContext
       content::GlobalRenderFrameHostId frame_id,
       EntriesAllowedByEnterprisePolicyCallback callback) override;
 
-  enum class Access { kRead, kWrite, kReadWrite };
-
-  enum class RequestType { kNewPermission, kRestorePermissions };
-
   void RevokeActiveGrants(const url::Origin& origin,
                           const base::FilePath& file_path = base::FilePath());
-
-  bool OriginHasReadAccess(const url::Origin& origin);
-  bool OriginHasWriteAccess(const url::Origin& origin);
 
   // Called by FileSystemAccessWebContentsHelper when a top-level frame was
   // navigated away from `origin` to some other origin.
@@ -140,9 +130,15 @@ class FileSystemAccessPermissionContext
 
   void PermissionGrantDestroyed(PermissionGrantImpl* grant);
 
+  // Restores the read permission for `path` if it was previously downgraded,
+  // e.g. by a `remove()` call.
+  void MaybeRestoreReadPermission(const url::Origin& origin,
+                                  const base::FilePath& path);
+
   void CheckShouldBlockAccessToPathAndReply(
       base::FilePath path,
       HandleType handle_type,
+      AccessTrigger access_trigger,
       std::vector<ChromeFileSystemAccessPermissionContext::BlockPathRule>
           extra_rules,
       base::OnceCallback<void(bool)> callback,
@@ -150,21 +146,21 @@ class FileSystemAccessPermissionContext
 
   void CheckPathAgainstBlocklist(const content::PathInfo& path,
                                  HandleType handle_type,
+                                 AccessTrigger access_trigger,
                                  base::OnceCallback<void(bool)> callback);
-  void DidCheckPathAgainstBlocklist(const url::Origin& origin,
+  void DidCheckPathAgainstBlocklist(int request_id,
+                                    const url::Origin& origin,
                                     const content::PathInfo& path,
                                     HandleType handle_type,
-                                    UserAction user_action,
+                                    AccessTrigger access_trigger,
                                     content::GlobalRenderFrameHostId frame_id,
                                     bool should_block);
 
-  void RunRestrictedPathCallback(const base::FilePath& file_path,
-                                 SensitiveEntryResult result);
+  void RunRestrictedPathCallback(int request_id, SensitiveEntryResult result);
 
-  void OnRestrictedPathResult(const base::FilePath& file_path,
-                              gin::Arguments* args);
+  void OnRestrictedPathResult(int request_id, gin::Arguments* args);
 
-  void MaybeEvictEntries(base::Value::Dict& dict);
+  void MaybeEvictEntries(base::DictValue& dict);
 
   void CleanupPermissions(const url::Origin& origin);
 
@@ -189,10 +185,13 @@ class FileSystemAccessPermissionContext
 
   const raw_ptr<const base::Clock> clock_;
 
-  std::map<url::Origin, base::Value::Dict> id_pathinfo_map_;
+  std::map<url::Origin, base::DictValue> id_pathinfo_map_;
 
-  std::map<base::FilePath, base::OnceCallback<void(SensitiveEntryResult)>>
-      callback_map_;
+  // Restricted-path confirmations waiting on the app's
+  // `file-system-access-restricted` handler, one per request.
+  int next_restricted_path_request_id_ = 0;
+  std::map<int, base::OnceCallback<void(SensitiveEntryResult)>>
+      restricted_path_callbacks_;
 
   std::unique_ptr<ChromeFileSystemAccessPermissionContext::BlockPathRules>
       block_path_rules_;

@@ -5,16 +5,19 @@
 #include "shell/browser/api/electron_api_power_monitor.h"
 
 #include "base/power_monitor/power_monitor.h"
-#include "base/power_monitor/power_monitor_device_source.h"
 #include "base/power_monitor/power_observer.h"
 #include "gin/data_object_builder.h"
-#include "shell/browser/browser.h"
 #include "shell/browser/javascript_environment.h"
-#include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_helper/dictionary.h"
-#include "shell/common/gin_helper/handle.h"
-#include "shell/common/gin_helper/object_template_builder.h"
+#include "shell/common/gin_helper/wrappable_pointer_tags.h"
 #include "shell/common/node_includes.h"
+#include "ui/base/idle/idle.h"
+#include "v8/include/cppgc/allocation.h"
+#include "v8/include/v8-cppgc.h"
+
+#if BUILDFLAG(IS_WIN)
+#include "ui/base/win/session_change_observer.h"
+#endif
 
 namespace gin {
 
@@ -60,15 +63,10 @@ struct Converter<base::PowerThermalObserver::DeviceThermalState> {
 
 namespace electron::api {
 
-gin::DeprecatedWrapperInfo PowerMonitor::kWrapperInfo = {
-    gin::kEmbedderNativeGin};
+const gin::WrapperInfo PowerMonitor::kWrapperInfo =
+    electron::MakeWrapperInfo(electron::kElectronPowerMonitor);
 
-PowerMonitor::PowerMonitor(v8::Isolate* isolate) {
-#if BUILDFLAG(IS_MAC)
-  Browser::Get()->SetShutdownHandler(base::BindRepeating(
-      &PowerMonitor::ShouldShutdown, base::Unretained(this)));
-#endif
-
+PowerMonitor::PowerMonitor() {
   auto* power_monitor = base::PowerMonitor::GetInstance();
   power_monitor->AddPowerStateObserver(this);
   power_monitor->AddPowerSuspendObserver(this);
@@ -80,6 +78,10 @@ PowerMonitor::PowerMonitor(v8::Isolate* isolate) {
 }
 
 PowerMonitor::~PowerMonitor() {
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN)
+  DestroyPlatformSpecificMonitors();
+#endif
+
   auto* power_monitor = base::PowerMonitor::GetInstance();
   power_monitor->RemovePowerStateObserver(this);
   power_monitor->RemovePowerSuspendObserver(this);
@@ -142,11 +144,9 @@ void PowerMonitor::SetListeningForShutdown(bool is_listening) {
 #endif
 
 // static
-v8::Local<v8::Value> PowerMonitor::Create(v8::Isolate* isolate) {
-  auto* pm = new PowerMonitor(isolate);
-  auto handle = gin_helper::CreateHandle(isolate, pm).ToV8();
-  pm->Pin(isolate);
-  return handle;
+PowerMonitor* PowerMonitor::Create(v8::Isolate* isolate) {
+  return cppgc::MakeGarbageCollected<PowerMonitor>(
+      isolate->GetCppHeap()->GetAllocationHandle());
 }
 
 gin::ObjectTemplateBuilder PowerMonitor::GetObjectTemplateBuilder(
@@ -161,8 +161,12 @@ gin::ObjectTemplateBuilder PowerMonitor::GetObjectTemplateBuilder(
   return builder;
 }
 
-const char* PowerMonitor::GetTypeName() {
-  return "PowerMonitor";
+const gin::WrapperInfo* PowerMonitor::wrapper_info() const {
+  return &kWrapperInfo;
+}
+
+const char* PowerMonitor::GetHumanReadableName() const {
+  return "Electron / PowerMonitor";
 }
 
 }  // namespace electron::api
@@ -199,14 +203,11 @@ void Initialize(v8::Local<v8::Object> exports,
                 void* priv) {
   v8::Isolate* const isolate = electron::JavascriptEnvironment::GetIsolate();
   gin_helper::Dictionary dict{isolate, exports};
-  dict.SetMethod("createPowerMonitor",
-                 base::BindRepeating(&PowerMonitor::Create));
-  dict.SetMethod("getSystemIdleState",
-                 base::BindRepeating(&GetSystemIdleState));
-  dict.SetMethod("getCurrentThermalState",
-                 base::BindRepeating(&GetCurrentThermalState));
-  dict.SetMethod("getSystemIdleTime", base::BindRepeating(&GetSystemIdleTime));
-  dict.SetMethod("isOnBatteryPower", base::BindRepeating(&IsOnBatteryPower));
+  dict.SetMethod<&PowerMonitor::Create>("createPowerMonitor");
+  dict.SetMethod<&GetSystemIdleState>("getSystemIdleState");
+  dict.SetMethod<&GetCurrentThermalState>("getCurrentThermalState");
+  dict.SetMethod<&GetSystemIdleTime>("getSystemIdleTime");
+  dict.SetMethod<&IsOnBatteryPower>("isOnBatteryPower");
 }
 
 }  // namespace

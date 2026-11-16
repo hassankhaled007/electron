@@ -11,10 +11,10 @@ counter to the design of globalShortcuts, and so we need to instead
 use `ui::MediaKeysListener`.
 
 diff --git a/content/browser/media/media_keys_listener_manager_impl.cc b/content/browser/media/media_keys_listener_manager_impl.cc
-index 42e37564e585987d367921568f0f1d2b7507f953..9baf89efbade01e8b60c579255f10799914e144f 100644
+index 9f532919895d135fcce15be3cd79b4460535b479..dfe2bffe603c69da8bc5e5e61ea501deb0675c86 100644
 --- a/content/browser/media/media_keys_listener_manager_impl.cc
 +++ b/content/browser/media/media_keys_listener_manager_impl.cc
-@@ -87,7 +87,11 @@ bool MediaKeysListenerManagerImpl::StartWatchingMediaKey(
+@@ -82,7 +82,11 @@ bool MediaKeysListenerManagerImpl::StartWatchingMediaKey(
        CanActiveMediaSessionControllerReceiveEvents();
  
    // Tell the underlying MediaKeysListener to listen for the key.
@@ -27,9 +27,9 @@ index 42e37564e585987d367921568f0f1d2b7507f953..9baf89efbade01e8b60c579255f10799
        !media_keys_listener_->StartWatchingMediaKey(key_code)) {
      return false;
    }
-@@ -361,6 +365,20 @@ void MediaKeysListenerManagerImpl::StartListeningForMediaKeysIfNecessary() {
+@@ -360,6 +364,20 @@ void MediaKeysListenerManagerImpl::StartListeningForMediaKeysIfNecessary() {
          this, ui::MediaKeysListener::Scope::kGlobal);
-     DCHECK(media_keys_listener_);
+     CHECK(media_keys_listener_, base::NotFatalUntil::M160);
    }
 +
 +#if BUILDFLAG(IS_MAC)
@@ -41,7 +41,7 @@ index 42e37564e585987d367921568f0f1d2b7507f953..9baf89efbade01e8b60c579255f10799
 +  if (!media_keys_listener_) {
 +    media_keys_listener_ = ui::MediaKeysListener::Create(
 +        this, ui::MediaKeysListener::Scope::kGlobal);
-+    DCHECK(media_keys_listener_);
++    CHECK(media_keys_listener_, base::NotFatalUntil::M160);
 +  }
 +#endif
 +
@@ -49,10 +49,10 @@ index 42e37564e585987d367921568f0f1d2b7507f953..9baf89efbade01e8b60c579255f10799
  }
  
 diff --git a/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.cc b/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.cc
-index 16b11c6115cc5504dbd15d58c4b9786633e90e96..7c0a2308d437a2d9cec433c6ab0fd6a9d0c08845 100644
+index 7fc441b954f4f483544b87e5d2a4fac79bb8e4f0..0d5a908ce200e4db93c02324f6ee8e792c97f347 100644
 --- a/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.cc
 +++ b/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.cc
-@@ -64,6 +64,22 @@ void GlobalAcceleratorListener::UnregisterAccelerator(
+@@ -63,6 +63,22 @@ void GlobalAcceleratorListener::UnregisterAccelerator(
    }
  }
  
@@ -73,21 +73,21 @@ index 16b11c6115cc5504dbd15d58c4b9786633e90e96..7c0a2308d437a2d9cec433c6ab0fd6a9
 +}
 +
  void GlobalAcceleratorListener::UnregisterAccelerators(Observer* observer) {
-   if (IsShortcutHandlingSuspended()) {
-     return;
+   auto it = accelerator_map_.begin();
+   while (it != accelerator_map_.end()) {
 diff --git a/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.h b/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.h
-index 57e35eb71c3f30341ced923af815e6bb78c26da6..96d2e93306c1aaf963744d52451f31e159c7c8b5 100644
+index 83d7381eea7f2a68bd947d2ca5aa343d07c2463e..a62e0154c2cc1de10c6b6902b8b5b124efda8e8e 100644
 --- a/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.h
 +++ b/ui/base/accelerators/global_accelerator_listener/global_accelerator_listener.h
-@@ -8,6 +8,7 @@
- #include <map>
- 
+@@ -13,6 +13,7 @@
+ #include "base/functional/callback.h"
  #include "base/memory/raw_ptr.h"
+ #include "base/values.h"
 +#include "content/public/browser/media_keys_listener_manager.h"
  #include "ui/base/accelerators/command.h"
  #include "ui/gfx/native_ui_types.h"
  
-@@ -42,6 +43,9 @@ class GlobalAcceleratorListener {
+@@ -47,6 +48,9 @@ class COMPONENT_EXPORT(GLOBAL_ACCELERATOR_LISTENER) GlobalAcceleratorListener {
    // The instance may be nullptr.
    static GlobalAcceleratorListener* GetInstance();
  

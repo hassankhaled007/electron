@@ -71,12 +71,10 @@ Notifications can be displayed directly from the renderer process with the
 
 ```js title='Renderer Process'
 const NOTIFICATION_TITLE = 'Title'
-const NOTIFICATION_BODY =
-  'Notification from the Renderer process. Click to log to console.'
+const NOTIFICATION_BODY = 'Notification from the Renderer process. Click to log to console.'
 const CLICK_MESSAGE = 'Notification clicked'
 
-new Notification(NOTIFICATION_TITLE, { body: NOTIFICATION_BODY }).onclick =
-  () => console.log(CLICK_MESSAGE)
+new Notification(NOTIFICATION_TITLE, { body: NOTIFICATION_BODY }).onclick = () => console.log(CLICK_MESSAGE)
 ```
 
 Here's a full example that you can open with Electron Fiddle:
@@ -119,18 +117,38 @@ Then, call `app.setAppUserModelId(process.execPath)` in the main process to see 
 
 #### Use advanced notifications
 
-Windows also allow for advanced notifications with custom templates, images, and other flexible
-elements.
+Windows allows for advanced notifications with custom templates, images, inputs, and action buttons.
 
-To send those notifications from the main process, you can use the userland module
-[`electron-windows-notifications`](https://github.com/felixrieseberg/electron-windows-notifications),
-which uses native Node addons to send `ToastNotification` and `TileNotification` objects.
+To send advanced notifications from the main process on Windows, use the [`toastXml`][notification-toast-xml] option of the `Notification` constructor. This property accepts an XML string conforming to the Microsoft [Toast XML Schema][ms-toast-schema] and supersedes other notification options.
 
-While notifications including buttons work with `electron-windows-notifications`,
-handling replies requires the use of
-[`electron-windows-interactive-notifications`](https://github.com/felixrieseberg/electron-windows-interactive-notifications),
-which helps with registering the required COM components and calling your
-Electron app with the entered user data.
+```js title='Main Process'
+const { Notification } = require('electron')
+
+const xml = `
+<toast>
+  <visual>
+    <binding template="ToastGeneric">
+      <text>Notification Title</text>
+      <text>Notification body text</text>
+    </binding>
+  </visual>
+  <actions>
+    <action content="Confirm" arguments="action=confirm" />
+    <action content="Dismiss" arguments="action=dismiss" />
+  </actions>
+</toast>`
+
+const notification = new Notification({ toastXml: xml })
+notification.show()
+```
+
+Important considerations when using Toast XML on Windows:
+
+* **AppUserModelID**: You must call [`app.setAppUserModelId()`][set-app-user-model-id] before showing notifications. Windows uses this ID to associate toast notifications with your application in the notification center.
+* **Image paths**: When including local images in `<image src="..." />`, paths must be absolute and formatted as `file:///` URLs (for example, using `url.pathToFileURL(imagePath).toString()`).
+* **XML escaping**: Dynamic strings placed inside XML elements or attributes must be XML-escaped (`&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`) to prevent XML parsing failures.
+* **Error handling**: If the XML string is malformed or invalid according to the Windows toast schema, the notification will not appear and the `failed` event will be emitted on the `Notification` instance.
+* **Handling action buttons**: Action buttons specify an `arguments` attribute. When clicked, Electron emits the `action` event with the action index. For deep-linking or custom protocol activation, specify `activationType="protocol"` on the `<action>` element.
 
 #### Query notification state
 
@@ -142,8 +160,12 @@ notification away.
 
 ### macOS
 
-Notifications are straightforward on macOS, but you should be aware of
-[Apple's Human Interface guidelines regarding notifications][apple-notification-guidelines].
+For notifications on macOS, your application will need to be code-signed in order
+for notification events to emit correctly. This requirement stems from the underlying
+UNNotification API provided by Apple. Unsigned binaries will emit a `failed` event
+when notification APIs are called.
+
+Additionally, you should be aware of [Apple's Human Interface guidelines regarding notifications][apple-notification-guidelines].
 
 Note that notifications are limited to 256 bytes in size and will be truncated
 if you exceed that limit.
@@ -169,3 +191,5 @@ including Cinnamon, Enlightenment, Unity, GNOME, and KDE.
 [apple-notification-guidelines]: https://developer.apple.com/design/human-interface-guidelines/notifications
 [windows-notification-state]: https://github.com/felixrieseberg/windows-notification-state
 [macos-notification-state]: https://github.com/felixrieseberg/macos-notification-state
+[notification-toast-xml]: ../api/notification.md#notificationtoastxml-windows
+[ms-toast-schema]: https://learn.microsoft.com/en-us/windows/apps/design/shell/tiles-and-notifications/toast-xml-schema

@@ -4,6 +4,7 @@
 
 #include "shell/app/node_main.h"
 
+#include <algorithm>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -12,7 +13,6 @@
 #include <utility>
 #include <vector>
 
-#include "base/base_switches.h"
 #include "base/command_line.h"
 #include "base/containers/fixed_flat_set.h"
 #include "base/environment.h"
@@ -21,11 +21,9 @@
 #include "base/strings/cstring_view.h"
 #include "base/task/single_thread_task_runner.h"
 #include "base/task/thread_pool/thread_pool_instance.h"
-#include "content/public/common/content_switches.h"
 #include "electron/fuses.h"
 #include "electron/mas.h"
-#include "gin/array_buffer.h"
-#include "gin/public/isolate_holder.h"
+#include "gin/converter.h"
 #include "gin/v8_initializer.h"
 #include "shell/app/uv_task_runner.h"
 #include "shell/browser/javascript_environment.h"
@@ -35,10 +33,12 @@
 #include "shell/common/node_bindings.h"
 #include "shell/common/node_includes.h"
 #include "shell/common/node_util.h"
-#include "shell/common/options_switches.h"
 #include "shell/common/platform_util.h"
+#include "third_party/electron_node/src/tracing/agent.h"
 
 #if BUILDFLAG(IS_WIN)
+#include <windows.h>
+
 #include "chrome/child/v8_crashpad_support_win.h"
 #endif
 
@@ -58,6 +58,21 @@
 #include "shell/app/electron_crash_reporter_client.h"
 #include "shell/common/crash_keys.h"
 #endif
+
+// node_watchdog.h picks its POSIX or Windows members with Node's __POSIX__
+// define, which Node's own targets set and Electron's do not. Windows needs
+// <windows.h>, included above.
+#include "electron/push_and_undef_node_defines.h"
+#if BUILDFLAG(IS_POSIX) && !defined(__POSIX__)
+#define __POSIX__
+#define ELECTRON_DEFINED_POSIX_FOR_NODE_WATCHDOG
+#endif
+#include "third_party/electron_node/src/node_watchdog.h"
+#if defined(ELECTRON_DEFINED_POSIX_FOR_NODE_WATCHDOG)
+#undef __POSIX__
+#undef ELECTRON_DEFINED_POSIX_FOR_NODE_WATCHDOG
+#endif
+#include "electron/pop_node_defines.h"
 
 namespace {
 
@@ -133,7 +148,12 @@ int NodeMain() {
   }
 
 #if BUILDFLAG(IS_MAC)
-  if (!ProcessSignatureIsSameWithCurrentApp(getppid())) {
+  // Capture the parent's audit token as early as possible. The audit token
+  // (unlike a raw PID) is bound to a single process instance.
+  std::optional<audit_token_t> parent_audit_token =
+      GetParentProcessAuditToken();
+  if (!parent_audit_token ||
+      !ProcessSignatureIsSameWithCurrentApp(*parent_audit_token)) {
     // On macOS, it is forbidden to run sandboxed app with custom arguments
     // from another app, i.e. args are discarded in following call:
     //   exec("Sandboxed.app", ["--custom-args-will-be-discarded"])
@@ -155,9 +175,8 @@ int NodeMain() {
   v8_crashpad_support::SetUp();
 #endif
 
-  auto* command_line = base::CommandLine::ForCurrentProcess();
-
 #if BUILDFLAG(IS_LINUX)
+  auto* command_line = base::CommandLine::ForCurrentProcess();
   int pid = -1;
   std::optional<std::string> fd_string = os_env->GetVar("CRASHDUMP_SIGNAL_FD");
   std::optional<std::string> pid_string =
@@ -194,25 +213,26 @@ int NodeMain() {
     // Parse Node.js cli flags and strip out disallowed options.
     std::vector<std::string> args = ElectronCommandLine::AsUtf8();
     ExitIfContainsDisallowedFlags(args);
+    // Silently ignore the obsolete workaround while applications migrate to
+    // automatic NUL detection.
+    if (base::CommandLine::ForCurrentProcess()->HasSwitch("no-stdio-init"))
+      std::erase(args, "--no-stdio-init");
+    // Match the other process types (see NodeBindings::ParseNodeCliFlags); an
+    // explicit --js-source-phase-imports later on the command line still wins.
+    // Kept out of process.execArgv below so fork() does not accumulate it.
+    constexpr std::string_view kNoSourcePhaseImports =
+        "--no-js-source-phase-imports";
+    args.insert(args.begin() + 1, std::string(kNoSourcePhaseImports));
 
     uint64_t process_flags =
         node::ProcessInitializationFlags::kNoInitializeV8 |
         node::ProcessInitializationFlags::kNoInitializeNodeV8Platform;
 
-    if (command_line->HasSwitch(switches::kNoStdioInit)) {
-      process_flags |= node::ProcessInitializationFlags::kNoStdioInitialization;
-      // remove the option to avoid node error "bad option: --no-stdio-init"
-      std::string option = std::string("--") + switches::kNoStdioInit;
-      std::erase(args, option);
-    } else {
 #if BUILDFLAG(IS_WIN)
-      if (!platform_util::IsNulDeviceEnabled()) {
-        LOG(FATAL) << "Unable to open nul device needed for initialization,"
-                      "aborting startup. As a workaround, try starting with --"
-                   << switches::kNoStdioInit;
-      }
+    // Node.js aborts when it cannot replace missing stdio handles with NUL.
+    if (!platform_util::IsNulDeviceEnabled())
+      process_flags |= node::ProcessInitializationFlags::kNoStdioInitialization;
 #endif
-    }
 
     std::shared_ptr<node::InitializationResult> result =
         node::InitializeOncePerProcess(
@@ -244,6 +264,11 @@ int NodeMain() {
     crash_keys::SetCrashKeysFromCommandLine(
         *base::CommandLine::ForCurrentProcess());
     crash_keys::SetPlatformCrashKey();
+#if BUILDFLAG(IS_WIN)
+    // libuv sets SEM_NOGPFAULTERRORBOX; clear it so Windows Error Reporting
+    // (and electron_wer.dll) still sees crashes crashpad cannot catch.
+    SetErrorMode(GetErrorMode() & ~SEM_NOGPFAULTERRORBOX);
+#endif
 #endif
 
     gin::V8Initializer::LoadV8Snapshot(
@@ -256,60 +281,99 @@ int NodeMain() {
     // idle in the kernel’s event provider .
     uv_loop_configure(loop, UV_METRICS_IDLE_TIME);
 
+    auto tracing_agent = node::tracing::Agent::CreateDefault();
+    CHECK(tracing_agent);
+
     // Initialize gin::IsolateHolder.
-    bool setup_wasm_streaming =
-        node::per_process::cli_options->get_per_isolate_options()
-            ->get_per_env_options()
-            ->experimental_fetch;
-    JavascriptEnvironment gin_env(loop, setup_wasm_streaming);
+    // Node.js now exposes fetch unconditionally, so WASM streaming (which
+    // relies on the fetch Response object) is always set up here.
+    // When this build embeds a Node startup snapshot (native builds) the
+    // isolate is created from it and no context exists yet; otherwise a fresh
+    // context was created and entered.
+    JavascriptEnvironment gin_env(loop, /*setup_wasm_streaming=*/true,
+                                  tracing_agent->GetTracingController());
+    const node::SnapshotData* const snapshot =
+        JavascriptEnvironment::NodeSnapshot();
 
     v8::Isolate* isolate = gin_env.isolate();
 
     v8::Isolate::Scope isolate_scope(isolate);
     v8::Locker locker(isolate);
+    // Implements --process-timeout, as node::NodeMainInstance::Run() does.
+    // Declared before the Environment so that the timeout still applies while
+    // the Environment is being freed.
+    std::unique_ptr<node::ProcessTimeoutWatchdog> process_timeout;
     node::Environment* env = nullptr;
     node::IsolateData* isolate_data = nullptr;
     {
       v8::HandleScope scope(isolate);
 
-      isolate_data = node::CreateIsolateData(isolate, loop, gin_env.platform());
+      // With a snapshot, hand its per-isolate data to CreateIsolateData so the
+      // templates/primordials are deserialized, and an empty context to
+      // CreateEnvironment so node materializes the main context (and the whole
+      // bootstrapped environment) from the snapshot instead of running the
+      // bootstrap -- the same path the browser process takes in
+      // NodeBindings::CreateEnvironment.
+      auto snapshot_wrapper =
+          snapshot ? node::EmbedderSnapshotData::BuiltinSnapshotData()
+                   : node::EmbedderSnapshotData::Pointer{};
+      isolate_data = node::CreateIsolateData(isolate, loop, gin_env.platform(),
+                                             /*allocator=*/nullptr,
+                                             snapshot_wrapper.get());
       CHECK_NE(nullptr, isolate_data);
 
       uint64_t env_flags = node::EnvironmentFlags::kDefaultFlags |
                            node::EnvironmentFlags::kHideConsoleWindows;
+      std::vector<std::string> exec_args = result->exec_args();
+      if (auto it = std::ranges::find(exec_args, kNoSourcePhaseImports);
+          it != exec_args.end()) {
+        exec_args.erase(it);
+      }
       env = electron::util::CreateEnvironment(
-          isolate, isolate_data, isolate->GetCurrentContext(), result->args(),
-          result->exec_args(),
+          isolate, isolate_data,
+          snapshot ? v8::Local<v8::Context>() : isolate->GetCurrentContext(),
+          result->args(), exec_args,
           static_cast<node::EnvironmentFlags::Flags>(env_flags));
       CHECK_NE(nullptr, env);
 
-      node::SetIsolateUpForNode(isolate);
+      if (snapshot) {
+        // The snapshot's main context was created inside CreateEnvironment and
+        // is not entered yet; enter it for the lifetime of the process, as
+        // JavascriptEnvironment does for the context it creates itself (its
+        // destructor exits the current context).
+        env->context()->Enter();
+      }
+      node::SetIsolateUpForNode(isolate, node::IsolateSettings{});
 
       gin_helper::Dictionary process(isolate, env->process_object());
-      process.SetMethod("crash", &ElectronBindings::Crash);
+      process.SetMethod<&ElectronBindings::Crash>("crash");
 
       // Setup process.crashReporter in child node processes
       auto reporter = gin_helper::Dictionary::CreateEmpty(isolate);
-      reporter.SetMethod("getParameters", &GetParameters);
+      reporter.SetMethod<&GetParameters>("getParameters");
 #if IS_MAS_BUILD()
-      reporter.SetMethod("addExtraParameter", &SetCrashKeyStub);
-      reporter.SetMethod("removeExtraParameter", &ClearCrashKeyStub);
+      reporter.SetMethod<&SetCrashKeyStub>("addExtraParameter");
+      reporter.SetMethod<&ClearCrashKeyStub>("removeExtraParameter");
 #else
-      reporter.SetMethod("addExtraParameter",
-                         &electron::crash_keys::SetCrashKey);
-      reporter.SetMethod("removeExtraParameter",
-                         &electron::crash_keys::ClearCrashKey);
+      reporter.SetMethod<&electron::crash_keys::SetCrashKey>(
+          "addExtraParameter");
+      reporter.SetMethod<&electron::crash_keys::ClearCrashKey>(
+          "removeExtraParameter");
 #endif
 
       process.Set("crashReporter", reporter);
     }
 
     v8::HandleScope scope(isolate);
+    process_timeout = node::ProcessTimeoutWatchdog::MaybeStart(env);
+    electron::util::FeedEnvironmentCodeCache(env);
     node::LoadEnvironment(env, node::StartExecutionCallback{}, &OnNodePreload);
 
     // Potential reasons we get Nothing here may include: the env
     // is stopping, or the user hooks process.emit('exit').
     exit_code = node::SpinEventLoop(env).FromMaybe(1);
+    if (process_timeout)
+      process_timeout->OnEnvironmentStopping();
 
     node::ResetStdio();
 
@@ -327,6 +391,11 @@ int NodeMain() {
   base::ThreadPoolInstance::Get()->Shutdown();
 
   v8::V8::Dispose();
+
+  // Matches node::InitializeOncePerProcess() above. In particular this joins
+  // the off-thread CA certificate loader that `require('tls')` starts, which
+  // would otherwise race the static destructors run by exit() and abort().
+  node::TearDownOncePerProcess();
 
   return exit_code;
 }

@@ -8,12 +8,15 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 
+#include "base/functional/callback_forward.h"
+#include "base/memory/raw_ptr.h"
 #include "base/memory/weak_ptr.h"
+#include "shell/browser/notifications/notification.h"
 
 namespace electron {
 
-class Notification;
 class NotificationDelegate;
 
 class NotificationPresenter {
@@ -22,12 +25,25 @@ class NotificationPresenter {
 
   virtual ~NotificationPresenter();
 
+  using GetDeliveredNotificationsCallback =
+      base::OnceCallback<void(std::vector<NotificationInfo>)>;
+
   base::WeakPtr<Notification> CreateNotification(
       NotificationDelegate* delegate,
       const std::string& notification_id);
   void CloseNotificationWithId(const std::string& notification_id);
 
-  std::set<Notification*> notifications() const { return notifications_; }
+  virtual void GetDeliveredNotifications(
+      GetDeliveredNotificationsCallback callback);
+  virtual void RemoveDeliveredNotifications(
+      const std::vector<std::string>& identifiers);
+  virtual void RemoveAllDeliveredNotifications();
+  virtual void RemoveDeliveredNotificationsByGroupId(
+      const std::string& group_id);
+
+  const std::set<raw_ptr<Notification>>& notifications() const {
+    return notifications_;
+  }
 
   // disable copy
   NotificationPresenter(const NotificationPresenter&) = delete;
@@ -43,7 +59,7 @@ class NotificationPresenter {
 
   void RemoveNotification(Notification* notification);
 
-  std::set<Notification*> notifications_;
+  std::set<raw_ptr<Notification>> notifications_;
 };
 
 }  // namespace electron

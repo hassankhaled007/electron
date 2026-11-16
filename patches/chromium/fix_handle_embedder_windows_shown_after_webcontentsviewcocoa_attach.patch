@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Samuel Attard <sattard@anthropic.com>
+Date: Mon, 30 Mar 2026 03:05:40 -0700
+Subject: fix: handle embedder windows shown after WebContentsViewCocoa attach
+
+The occlusion checker assumes windows are shown before or at the same
+time as a WebContentsViewCocoa is attached. Embedders like Electron
+support creating a window hidden, attaching web contents, and showing
+later. This breaks two assumptions:
+
+1. updateWebContentsVisibility only checks -[NSWindow isOccluded], which
+   defaults to NO for never-shown windows, so viewDidMoveToWindow
+   incorrectly reports kVisible for hidden windows.
+
+2. windowChangedOcclusionState: only responds to checker-originated
+   notifications, but setOccluded: early-returns when isOccluded doesn't
+   change. A hidden window's isOccluded is NO and stays NO after show(),
+   so no checker notification fires on show and the view never updates
+   to kVisible.
+
+Fix by also checking occlusionState in updateWebContentsVisibility and
+responding to macOS-originated notifications in
+windowChangedOcclusionState:.
+
+not-yet-shown windows in performOcclusionStateUpdates are handled
+upstream, which clears their occlusion state so painting is not stopped
+before first show.
+
+This patch can be removed if the changes are upstreamed to Chromium.
+
+diff --git a/content/app_shim_remote_cocoa/web_contents_view_cocoa.mm b/content/app_shim_remote_cocoa/web_contents_view_cocoa.mm
+index 5daf34f2e0cd022f02c5b5d923703e60db5103e1..beb01d7ea3cd60b8ab39c8cabe05d47cf3f9f215 100644
+--- a/content/app_shim_remote_cocoa/web_contents_view_cocoa.mm
++++ b/content/app_shim_remote_cocoa/web_contents_view_cocoa.mm
+@@ -548,7 +548,8 @@ - (void)updateWebContentsVisibility {
+   Visibility visibility = Visibility::kVisible;
+   if ([self isHiddenOrHasHiddenAncestor] || ![self window])
+     visibility = Visibility::kHidden;
+-  else if ([[self window] isOccluded])
++  else if ([[self window] isOccluded] ||
++           !([[self window] occlusionState] & NSWindowOcclusionStateVisible))
+     visibility = Visibility::kOccluded;
+ 
+   [self updateWebContentsVisibility:visibility];
+@@ -601,12 +602,12 @@ - (void)viewWillMoveToWindow:(NSWindow*)newWindow {
+ }
+ 
+ - (void)windowChangedOcclusionState:(NSNotification*)aNotification {
+-  // Only respond to occlusion notifications sent by the occlusion checker.
+-  NSDictionary* userInfo = [aNotification userInfo];
+-  if (userInfo[remote_cocoa::kWindowOcclusionCheckerNotificationUserInfoKey] !=
+-      nil) {
+-    [self updateWebContentsVisibility];
+-  }
++  // Respond to occlusion notifications from both macOS and the occlusion
++  // checker. Embedders (e.g. Electron) may attach a WebContentsViewCocoa to
++  // a window that has not yet been shown; macOS will notify us when the
++  // window's occlusion state changes, but the occlusion checker will not
++  // because -[NSWindow isOccluded] remains NO before and after show.
++  [self updateWebContentsVisibility];
+ }
+ 
+ - (void)viewDidMoveToWindow {

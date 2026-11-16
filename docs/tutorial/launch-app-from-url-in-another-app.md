@@ -43,6 +43,10 @@ if (process.defaultApp) {
 }
 ```
 
+On Windows, when running through the default Electron executable (for example, `electron .`),
+registration must include the app entry path so protocol launches load the correct application.
+Packaged apps launch their own executable and do not need these additional arguments.
+
 We will now define the function in charge of creating our browser window and load our application's `index.html` file.
 
 ```js
@@ -62,9 +66,9 @@ const createWindow = () => {
 }
 ```
 
-In this next step, we will create our  `BrowserWindow` and tell our application how to handle an event in which an external protocol is clicked.
+In this next step, we will create our `BrowserWindow` and tell our application how to handle an event in which an external protocol is clicked.
 
-This code will be different in Windows and Linux compared to MacOS. This is due to both platforms emitting the `second-instance` event rather than the `open-url` event and Windows requiring additional code in order to open the contents of the protocol link within the same Electron instance. Read more about this [here](../api/app.md#apprequestsingleinstancelockadditionaldata).
+This code will be different in Windows and Linux compared to macOS. This is due to both platforms emitting the `second-instance` event rather than the `open-url` event and Windows requiring additional code in order to open the contents of the protocol link within the same Electron instance. Read more about this [here](../api/app.md#apprequestsingleinstancelockadditionaldata).
 
 #### Windows and Linux code:
 
@@ -74,7 +78,7 @@ const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 } else {
-  app.on('second-instance', (event, commandLine, workingDirectory) => {
+  app.on('second-instance', (event, commandLine) => {
     // Someone tried to run a second instance, we should focus our window.
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
@@ -87,11 +91,22 @@ if (!gotTheLock) {
   // Create mainWindow, load the rest of the app, etc...
   app.whenReady().then(() => {
     createWindow()
+    // Check for deep link on cold start
+    if (process.argv.length >= 2) {
+      const lastArg = process.argv[process.argv.length - 1]
+      if (lastArg.startsWith('electron-fiddle://')) {
+        dialog.showErrorBox('Welcome Back', `You arrived from: ${lastArg}`)
+      }
+    }
   })
 }
 ```
 
-#### MacOS code:
+#### macOS code:
+
+> [!IMPORTANT]
+> Register an `open-url` listener during initial startup, before waiting for `ready` or other
+> asynchronous initialization. Listeners registered later may miss a launch URL delivered by macOS.
 
 ```js @ts-type={createWindow:()=>void}
 // This method will be called when Electron has finished
@@ -178,9 +193,9 @@ packager({
       schemes: ['electron-fiddle']
     }
   ]
-
-}).then(paths => console.log(`SUCCESS: Created ${paths.join(', ')}`))
-  .catch(err => console.error(`ERROR: ${err.message}`))
+})
+  .then((paths) => console.log(`SUCCESS: Created ${paths.join(', ')}`))
+  .catch((err) => console.error(`ERROR: ${err.message}`))
 ```
 
 If you're using Electron Packager's CLI, use the `--protocol` and `--protocol-name` flags. For

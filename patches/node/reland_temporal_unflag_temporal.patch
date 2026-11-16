@@ -6,10 +6,10 @@ Subject: Reland "[temporal] Unflag Temporal"
 https://chromium-review.googlesource.com/c/v8/v8/+/7123876
 
 diff --git a/test/common/globals.js b/test/common/globals.js
-index 34563b304f0e708ae066f8303a09e37b6bf123d6..cffba7d5f1936c4459b5afd91b8bc45b9038436d 100644
+index 4ecc307f76557e1323719e230515bf6e231b1e2b..14f11d61adcec87b0a211d64a2816c1d8ec02acc 100644
 --- a/test/common/globals.js
 +++ b/test/common/globals.js
-@@ -69,6 +69,7 @@ const intrinsics = new Set([
+@@ -68,6 +68,7 @@ const intrinsics = new Set([
    'SuppressedError',
    'DisposableStack',
    'AsyncDisposableStack',

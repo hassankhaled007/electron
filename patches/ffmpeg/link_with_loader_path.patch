@@ -15,10 +15,10 @@ include the out dir, and the linker won't be able to find ffmpeg.dylib
 because of so.
 
 diff --git a/BUILD.gn b/BUILD.gn
-index fecd76cb5147f2c2973a77ff12b44d184758144e..c4059d1465cdd0ca60e7fb956ffc835b079611bd 100644
+index a00ce51d43a5c3353fd3cebee6bc9d06a37ab0cc..81f0f1a30208b31fda80f771591a39bcaf60f75f 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -458,7 +458,7 @@ if (is_component_ffmpeg) {
+@@ -479,7 +479,7 @@ if (is_component_ffmpeg) {
  
      if (!is_component_build) {
        if (is_mac) {

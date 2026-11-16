@@ -5,6 +5,7 @@
 #include "shell/common/gin_converters/blink_converter.h"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -15,6 +16,7 @@
 #include "base/strings/utf_string_conversions.h"
 #include "gin/converter.h"
 #include "gin/data_object_builder.h"
+#include "services/network/public/mojom/referrer_policy.mojom-shared.h"
 #include "shell/common/gin_converters/gfx_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
 #include "shell/common/gin_converters/std_converter.h"
@@ -29,8 +31,6 @@
 #include "third_party/blink/public/common/input/web_mouse_wheel_event.h"
 #include "third_party/blink/public/common/widget/device_emulation_params.h"
 #include "third_party/blink/public/mojom/devtools/console_message.mojom.h"
-#include "third_party/blink/public/mojom/loader/referrer.mojom.h"
-#include "ui/base/clipboard/clipboard.h"
 #include "ui/events/blink/blink_event_util.h"
 #include "ui/events/keycodes/dom/keycode_converter.h"
 #include "ui/events/keycodes/keyboard_code_conversion.h"
@@ -54,8 +54,10 @@ struct Converter<char16_t> {
   static bool FromV8(v8::Isolate* isolate,
                      v8::Local<v8::Value> val,
                      char16_t* out) {
-    std::u16string code = base::UTF8ToUTF16(gin::V8ToString(isolate, val));
-    if (code.length() != 1)
+    // V8 strings are UTF-16; read directly rather than via UTF-8.
+    std::u16string code;
+    if (!gin::Converter<std::u16string>::FromV8(isolate, val, &code) ||
+        code.length() != 1)
       return false;
     *out = code[0];
     return true;
@@ -225,6 +227,7 @@ namespace {
 
 std::vector<std::string_view> ModifiersToArray(int modifiers) {
   std::vector<std::string_view> modifier_strings;
+  modifier_strings.reserve(Modifiers.size());
 
   for (const auto& [name, mask] : Modifiers)
     if (mask & modifiers)
@@ -356,20 +359,22 @@ v8::Local<v8::Value> Converter<blink::WebKeyboardEvent>::ToV8(
   auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
 
   dict.Set("type", in.GetType());
-  dict.Set("key", ui::KeycodeConverter::DomKeyToKeyString(in.dom_key));
+  dict.Set("key", ui::KeycodeConverter::DomKeyToKeyString(
+                      static_cast<ui::DomKey>(in.dom_key)));
   dict.Set("code", ui::KeycodeConverter::DomCodeToCodeString(
                        static_cast<ui::DomCode>(in.dom_code)));
 
   using Modifiers = blink::WebInputEvent::Modifiers;
-  dict.Set("isAutoRepeat", (in.GetModifiers() & Modifiers::kIsAutoRepeat) != 0);
-  dict.Set("isComposing", (in.GetModifiers() & Modifiers::kIsComposing) != 0);
-  dict.Set("shift", (in.GetModifiers() & Modifiers::kShiftKey) != 0);
-  dict.Set("control", (in.GetModifiers() & Modifiers::kControlKey) != 0);
-  dict.Set("alt", (in.GetModifiers() & Modifiers::kAltKey) != 0);
-  dict.Set("meta", (in.GetModifiers() & Modifiers::kMetaKey) != 0);
+  const int mods = in.GetModifiers();
+  dict.Set("isAutoRepeat", (mods & Modifiers::kIsAutoRepeat) != 0);
+  dict.Set("isComposing", (mods & Modifiers::kIsComposing) != 0);
+  dict.Set("shift", (mods & Modifiers::kShiftKey) != 0);
+  dict.Set("control", (mods & Modifiers::kControlKey) != 0);
+  dict.Set("alt", (mods & Modifiers::kAltKey) != 0);
+  dict.Set("meta", (mods & Modifiers::kMetaKey) != 0);
   dict.Set("location", GetKeyLocationCode(in));
-  dict.Set("_modifiers", in.GetModifiers());
-  dict.Set("modifiers", ModifiersToArray(in.GetModifiers()));
+  dict.Set("_modifiers", mods);
+  dict.Set("modifiers", ModifiersToArray(mods));
 
   return dict.GetHandle();
 }
@@ -600,6 +605,9 @@ Converter<std::optional<blink::mojom::FormControlType>>::ToV8(
       case blink::mojom::FormControlType::kOutput:
         str = "output";
         break;
+      case blink::mojom::FormControlType::kRangeGroup:
+        str = "range-group";
+        break;
       case blink::mojom::FormControlType::kSelectMultiple:
         str = "select-multiple";
         break;
@@ -614,7 +622,9 @@ Converter<std::optional<blink::mojom::FormControlType>>::ToV8(
   return StringToV8(isolate, str);
 }
 
-v8::Local<v8::Value> EditFlagsToV8(v8::Isolate* isolate, int editFlags) {
+v8::Local<v8::Value> EditFlagsToV8(v8::Isolate* isolate,
+                                   int editFlags,
+                                   bool is_paste_enabled) {
   auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
   dict.Set("canUndo",
            !!(editFlags & blink::ContextMenuDataEditFlags::kCanUndo));
@@ -623,16 +633,11 @@ v8::Local<v8::Value> EditFlagsToV8(v8::Isolate* isolate, int editFlags) {
   dict.Set("canCut", !!(editFlags & blink::ContextMenuDataEditFlags::kCanCut));
   dict.Set("canCopy",
            !!(editFlags & blink::ContextMenuDataEditFlags::kCanCopy));
-
   bool pasteFlag = false;
   if (editFlags & blink::ContextMenuDataEditFlags::kCanPaste) {
-    std::vector<std::u16string> types;
-    ui::Clipboard::GetForCurrentThread()->ReadAvailableTypes(
-        ui::ClipboardBuffer::kCopyPaste, /* data_dst = */ nullptr, &types);
-    pasteFlag = !types.empty();
+    pasteFlag = is_paste_enabled;
   }
   dict.Set("canPaste", pasteFlag);
-
   dict.Set("canDelete",
            !!(editFlags & blink::ContextMenuDataEditFlags::kCanDelete));
   dict.Set("canSelectAll",
@@ -706,33 +711,6 @@ bool Converter<network::mojom::ReferrerPolicy>::FromV8(
     v8::Local<v8::Value> val,
     network::mojom::ReferrerPolicy* out) {
   return FromV8WithLowerLookup(isolate, val, ReferrerPolicies, out);
-}
-
-// static
-v8::Local<v8::Value> Converter<blink::mojom::Referrer>::ToV8(
-    v8::Isolate* isolate,
-    const blink::mojom::Referrer& val) {
-  auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
-  dict.Set("url", ConvertToV8(isolate, val.url));
-  dict.Set("policy", ConvertToV8(isolate, val.policy));
-  return gin::ConvertToV8(isolate, dict);
-}
-//
-// static
-bool Converter<blink::mojom::Referrer>::FromV8(v8::Isolate* isolate,
-                                               v8::Local<v8::Value> val,
-                                               blink::mojom::Referrer* out) {
-  gin_helper::Dictionary dict;
-  if (!ConvertFromV8(isolate, val, &dict))
-    return false;
-
-  if (!dict.Get("url", &out->url))
-    return false;
-
-  if (!dict.Get("policy", &out->policy))
-    return false;
-
-  return true;
 }
 
 v8::Local<v8::Value> Converter<blink::CloneableMessage>::ToV8(

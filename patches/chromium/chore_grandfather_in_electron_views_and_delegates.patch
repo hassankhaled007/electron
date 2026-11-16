@@ -10,17 +10,15 @@ Subject: chore: "grandfather in" Electron Views and Delegates
 6448510: Lock further access to View::set_owned_by_client(). | https://chromium-review.googlesource.com/c/chromium/src/+/6448510
 
 diff --git a/ui/views/view.h b/ui/views/view.h
-index 73ec09054efdd600b8e630b4bbe7870d7f4b87f1..7934ffa8aa25b6cb39c6af114afd38d84d8288ba 100644
+index 816c447f0f5c7cfd04e5629e624a5bd4774fff03..2c244362296a7b66cbd7b4ff9aa63823474e4454 100644
 --- a/ui/views/view.h
 +++ b/ui/views/view.h
-@@ -77,6 +77,19 @@ class ArcNotificationContentView;
- class WideFrameView;
+@@ -78,6 +78,17 @@ namespace ash {
+ class ArcNotificationContentView;
  }  // namespace ash
  
 +namespace electron {
 +class DevToolsWindowDelegate;
-+class InspectableWebContentsView;
-+class MenuBar;
 +class RootView;
 +class RootViewMac;
 +}
@@ -33,14 +31,12 @@ index 73ec09054efdd600b8e630b4bbe7870d7f4b87f1..7934ffa8aa25b6cb39c6af114afd38d8
  namespace exo {
  class ShellSurfaceBase;
  }
-@@ -308,6 +321,14 @@ class VIEWS_EXPORT View : public ui::LayerDelegate,
+@@ -284,6 +295,12 @@ class VIEWS_EXPORT View : public ui::LayerDelegate,
   public:
    class OwnedByClientPassKey {
     private:
 +    // TODO(ckerr) can this list be shortened?
 +    friend class electron::DevToolsWindowDelegate;
-+    friend class electron::InspectableWebContentsView;
-+    friend class electron::MenuBar;
 +    friend class electron::RootView;
 +    friend class electron::RootViewMac;
 +    friend class electron::api::ImageView;
@@ -49,10 +45,10 @@ index 73ec09054efdd600b8e630b4bbe7870d7f4b87f1..7934ffa8aa25b6cb39c6af114afd38d8
      // These existing cases are "grandfathered in", but there shouldn't be more.
      // See comments atop class.
 diff --git a/ui/views/widget/widget_delegate.h b/ui/views/widget/widget_delegate.h
-index 0315a1fac360ecea54cf8c5c065e777508193169..49df61c710fad846a29f074a91ceba2d8d239d5a 100644
+index 298f2848afa9a358f8d8c22c5289f3316f86310d..ba8c8be88fb22f9a5c382157a2378511e1b90c3d 100644
 --- a/ui/views/widget/widget_delegate.h
 +++ b/ui/views/widget/widget_delegate.h
-@@ -168,6 +168,12 @@ namespace crostini {
+@@ -166,6 +166,12 @@ namespace crostini {
  class AppRestartDialog;
  }
  
@@ -65,7 +61,7 @@ index 0315a1fac360ecea54cf8c5c065e777508193169..49df61c710fad846a29f074a91ceba2d
  namespace exo {
  class ShellSurfaceBase;
  }
-@@ -368,6 +374,7 @@ class VIEWS_EXPORT WidgetDelegate {
+@@ -355,6 +361,7 @@ class VIEWS_EXPORT WidgetDelegate {
  
    class OwnedByWidgetPassKey {
     private:
@@ -73,7 +69,7 @@ index 0315a1fac360ecea54cf8c5c065e777508193169..49df61c710fad846a29f074a91ceba2d
      // DO NOT ADD TO THIS LIST!
      // These existing cases are "grandfathered in", but there shouldn't be more.
      // See comments atop `SetOwnedByWidget()`.
-@@ -461,6 +468,7 @@ class VIEWS_EXPORT WidgetDelegate {
+@@ -444,6 +451,7 @@ class VIEWS_EXPORT WidgetDelegate {
    };
    class RegisterDeleteCallbackPassKey {
     private:
@@ -81,7 +77,7 @@ index 0315a1fac360ecea54cf8c5c065e777508193169..49df61c710fad846a29f074a91ceba2d
      // DO NOT ADD TO THIS LIST!
      // These existing cases are "grandfathered in", but there shouldn't be more.
      // See comments atop `RegisterDeleteDelegateCallback()`.
-@@ -916,6 +924,7 @@ class VIEWS_EXPORT WidgetDelegateView : public WidgetDelegate, public View {
+@@ -898,6 +906,7 @@ class VIEWS_EXPORT WidgetDelegateView : public WidgetDelegate, public View {
    View* GetContentsView() override;
  
   private:

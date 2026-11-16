@@ -5,14 +5,12 @@
 #ifndef ELECTRON_SHELL_COMMON_GIN_CONVERTERS_CONTENT_CONVERTER_H_
 #define ELECTRON_SHELL_COMMON_GIN_CONVERTERS_CONTENT_CONVERTER_H_
 
-#include <utility>
-
+#include "base/memory/raw_ptr.h"
+#include "content/public/browser/context_menu_params.h"
 #include "content/public/common/referrer.h"
 #include "content/public/common/stop_find_action.h"
 #include "gin/converter.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
-#include "third_party/blink/public/mojom/choosers/popup_menu.mojom.h"
-#include "third_party/blink/public/mojom/permissions/permission_status.mojom-forward.h"
 #include "ui/base/mojom/menu_source_type.mojom-forward.h"
 
 namespace content {
@@ -26,16 +24,13 @@ namespace input {
 struct NativeWebKeyboardEvent;
 }
 
-using ContextMenuParamsWithRenderFrameHost =
-    std::pair<content::ContextMenuParams, content::RenderFrameHost*>;
+struct ContextMenuParamsWithRenderFrameHost {
+  content::ContextMenuParams params;
+  raw_ptr<content::RenderFrameHost> render_frame_host;
+  bool is_paste_enabled;
+};
 
 namespace gin {
-
-template <>
-struct Converter<blink::mojom::MenuItem::Type> {
-  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
-                                   const blink::mojom::MenuItem::Type& val);
-};
 
 template <>
 struct Converter<ContextMenuParamsWithRenderFrameHost> {

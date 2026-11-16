@@ -129,7 +129,7 @@ page.
 <webview src="https://www.google.com/" nodeintegrationinsubframes></webview>
 ```
 
-A `boolean` for the experimental option for enabling NodeJS support in sub-frames such as iframes
+A `boolean` for the experimental option for enabling Node.js support in sub-frames such as iframes
 inside the `webview`. All your preloads will load for every iframe, you can
 use `process.isMainFrame` to determine if you are in the main frame or not.
 This option is disabled by default in the guest page.
@@ -214,7 +214,9 @@ value will fail with a DOM exception.
 ```
 
 A `boolean`. When this attribute is present the guest page will be allowed to open new
-windows. Popups are disabled by default.
+windows, whether through `window.open()` or a link opened into a new window
+(for example a modifier-clicked or `target="_blank"` link). Popups are
+disabled by default.
 
 ### `webpreferences`
 
@@ -229,6 +231,12 @@ The string follows the same format as the features string in `window.open`.
 A name by itself is given a `true` boolean value.
 A preference can be set to another value by including an `=`, followed by the value.
 Special values `yes` and `1` are interpreted as `true`, while `no` and `0` are interpreted as `false`.
+
+Security-critical preferences cannot be used to make the guest less secure than
+its embedder. When the embedder has any of `contextIsolation`, `javascript`,
+`nodeIntegration`, `nodeIntegrationInWorker`, `sandbox` or `nodeIntegrationInSubFrames`
+set to its more secure value, the guest inherits that value and the corresponding
+`webpreferences` entry is ignored.
 
 ### `enableblinkfeatures`
 
@@ -471,7 +479,7 @@ Executes editing command `cut` in page.
 
 Executes editing command `copy` in page.
 
-#### `<webview>.centerSelection()`
+### `<webview>.centerSelection()`
 
 Centers the current text selection in page.
 
@@ -495,15 +503,15 @@ Executes editing command `selectAll` in page.
 
 Executes editing command `unselect` in page.
 
-#### `<webview>.scrollToTop()`
+### `<webview>.scrollToTop()`
 
 Scrolls to the top of the current `<webview>`.
 
-#### `<webview>.scrollToBottom()`
+### `<webview>.scrollToBottom()`
 
 Scrolls to the bottom of the current `<webview>`.
 
-#### `<webview>.adjustSelection(options)`
+### `<webview>.adjustSelection(options)`
 
 * `options` Object
   * `start` Number (optional) - Amount to shift the start index of the current selection.
@@ -588,6 +596,7 @@ Stops any `findInPage` request for the `webview` with the provided `action`.
   * `footer` string (optional) - string to be printed as page footer.
   * `pageSize` string | Size (optional) - Specify page size of the printed document. Can be `A3`,
   `A4`, `A5`, `Legal`, `Letter`, `Tabloid` or an Object containing `height` in microns.
+  * `usePrinterDefaultPageSize` boolean (optional) - Whether to use the system's default page size. Default is `false`. Cannot be combined with `pageSize`. When `deviceName` is provided, uses the default page size of that specific printer. When `deviceName` is not provided, uses the default page size of the system's default printer. If the printer's default page size cannot be retrieved, falls back to A4 (210mm x 297mm).
 
 Returns `Promise<void>`
 
@@ -595,24 +604,7 @@ Prints `webview`'s web page. Same as `webContents.print([options])`.
 
 ### `<webview>.printToPDF(options)`
 
-* `options` Object
-  * `landscape` boolean (optional) - Paper orientation.`true` for landscape, `false` for portrait. Defaults to false.
-  * `displayHeaderFooter` boolean (optional) - Whether to display header and footer. Defaults to false.
-  * `printBackground` boolean (optional) - Whether to print background graphics. Defaults to false.
-  * `scale` number(optional)  - Scale of the webpage rendering. Defaults to 1.
-  * `pageSize` string | Size (optional) - Specify page size of the generated PDF. Can be `A0`, `A1`, `A2`, `A3`,
-  `A4`, `A5`, `A6`, `Legal`, `Letter`, `Tabloid`, `Ledger`, or an Object containing `height` and `width` in inches. Defaults to `Letter`.
-  * `margins` Object (optional)
-    * `top` number (optional) - Top margin in inches. Defaults to 1cm (~0.4 inches).
-    * `bottom` number (optional) - Bottom margin in inches. Defaults to 1cm (~0.4 inches).
-    * `left` number (optional) - Left margin in inches. Defaults to 1cm (~0.4 inches).
-    * `right` number (optional) - Right margin in inches. Defaults to 1cm (~0.4 inches).
-  * `pageRanges` string (optional) - Page ranges to print, e.g., '1-5, 8, 11-13'. Defaults to the empty string, which means print all pages.
-  * `headerTemplate` string (optional) - HTML template for the print header. Should be valid HTML markup with following classes used to inject printing values into them: `date` (formatted print date), `title` (document title), `url` (document location), `pageNumber` (current page number) and `totalPages` (total pages in the document). For example, `<span class=title></span>` would generate span containing the title.
-  * `footerTemplate` string (optional) - HTML template for the print footer. Should use the same format as the `headerTemplate`.
-  * `preferCSSPageSize` boolean (optional) - Whether or not to prefer page size as defined by css. Defaults to false, in which case the content will be scaled to fit the paper size.
-  * `generateTaggedPDF` boolean (optional) _Experimental_ - Whether or not to generate a tagged (accessible) PDF. Defaults to false. As this property is experimental, the generated PDF may not adhere fully to PDF/UA and WCAG standards.
-  * `generateDocumentOutline` boolean (optional) _Experimental_ - Whether or not to generate a PDF document outline from content headers. Defaults to false.
+* `options` [PrintToPDFOptions](structures/print-to-pdf-options.md?inline)
 
 Returns `Promise<Uint8Array>` - Resolves with the generated PDF data.
 
@@ -620,11 +612,21 @@ Prints `webview`'s web page as PDF, Same as `webContents.printToPDF(options)`.
 
 ### `<webview>.capturePage([rect])`
 
+<!--
+```YAML history
+changes:
+  - pr-url: https://github.com/electron/electron/pull/53813
+    description: "The image now has the page's device scale factor, so `image.getSize()` is in DIPs."
+    breaking-changes-header: behavior-changed-captured-page-images-have-the-pages-scale-factor
+```
+-->
+
 * `rect` [Rectangle](structures/rectangle.md) (optional) - The area of the page to be captured.
 
 Returns `Promise<NativeImage>` - Resolves with a [NativeImage](native-image.md)
 
 Captures a snapshot of the page within `rect`. Omitting `rect` will capture the whole visible page.
+The image has the page's device scale factor (for offscreen rendering, `webPreferences.offscreen.deviceScaleFactor`), so `image.getSize()` is in DIPs and `image.toBitmap()` holds the full-resolution pixels.
 
 ### `<webview>.send(channel, ...args)`
 
@@ -970,6 +972,10 @@ Returns:
 * `args` any[]
 
 Fired when the guest page has sent an asynchronous message to embedder page.
+`frameId` does not tell the embedder which document sent the message; when
+that matters, have the guest use `ipcRenderer.send()` and handle the guest
+`webContents`' [`ipc-message`](web-contents.md#event-ipc-message) event in the
+main process, where `event.senderFrame` identifies the sender.
 
 With `sendToHost` method and `ipc-message` event you can communicate
 between guest page and embedder page:
@@ -1042,7 +1048,7 @@ Returns:
 
 Emitted when a link is clicked in DevTools or 'Open in new tab' is selected for a link in its context menu.
 
-#### Event: 'devtools-search-query'
+### Event: 'devtools-search-query'
 
 Returns:
 
@@ -1111,9 +1117,9 @@ Returns:
     `input-datetime-local`, `input-email`, `input-file`, `input-hidden`,
     `input-image`, `input-month`, `input-number`, `input-password`, `input-radio`,
     `input-range`, `input-reset`, `input-search`, `input-submit`, `input-telephone`,
-    `input-text`, `input-time`, `input-url`, `input-week`, `output`, `reset-button`,
-    `select-list`, `select-list`, `select-multiple`, `select-one`, `submit-button`,
-    and `text-area`,
+    `input-text`, `input-time`, `input-url`, `input-week`, `output`, `range-group`,
+    `reset-button`, `select-list`, `select-multiple`, `select-one`,
+    `submit-button`, and `text-area`,
   * `spellcheckEnabled` boolean - If the context is editable, whether or not spellchecking is enabled.
   * `menuSourceType` string - Input source that invoked the context menu.
     Can be `none`, `mouse`, `keyboard`, `touch`, `touchMenu`, `longPress`, `longTap`, `touchHandle`, `stylus`, `adjustSelection`, or `adjustSelectionReset`.

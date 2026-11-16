@@ -3,15 +3,22 @@ From: Charles Kerr <charles@charleskerr.com>
 Date: Tue, 22 Mar 2022 16:24:44 -0500
 Subject: build: make libcxx_abi_unstable false for electron
 
-https://nornagon.medium.com/a-libc-odyssey-973e51649063
+The libc++ C++ standard library uses ABI versioning to control binary
+compatibility. ABI version 2 (Chromium's default) enables various
+optimizations that break compatibility with system libc++, while ABI
+version 1 maintains compatibility needed for native Node.js modules.
 
-See also https://github.com/electron/electron/issues/45810#issuecomment-2691417213.
+References:
+* https://nornagon.medium.com/a-libc-odyssey-973e51649063
+* https://github.com/electron/electron/issues/45810#issuecomment-2691417213.
+* https://libcxx.llvm.org/ABIGuarantees.html
+* third_party/libc++/src/include/__configuration/abi.h
 
 diff --git a/buildtools/third_party/libc++/__config_site b/buildtools/third_party/libc++/__config_site
-index 3cd0af88fd13613216464d31d04e26dbb8f61343..6335536338e1eba8b56055eee31910ecba6a65c4 100644
+index a50ea2354e34b52b69ecb6b103c25375ec4f770f..8f477cc225edd513d498389cb2c58ce57bfea480 100644
 --- a/buildtools/third_party/libc++/__config_site
 +++ b/buildtools/third_party/libc++/__config_site
-@@ -18,7 +18,9 @@
+@@ -18,7 +18,11 @@
  //    _LIBCPP_ABI_NAMESPACE to a shorter value.
  #define _LIBCPP_ABI_NAMESPACE __Cr
  
@@ -19,6 +26,59 @@ index 3cd0af88fd13613216464d31d04e26dbb8f61343..6335536338e1eba8b56055eee31910ec
 +#define _LIBCPP_ABI_VERSION 1
 +#define _LIBCPP_ABI_USE_WRAP_ITER_IN_STD_ARRAY
 +#define _LIBCPP_ABI_USE_WRAP_ITER_IN_STD_STRING_VIEW
++#define _LIBCPP_ABI_TRIVIALLY_COPYABLE_BIT_ITERATOR
++#define _LIBCPP_ABI_BITSET_VECTOR_BOOL_CONST_SUBSCRIPT_RETURN_BOOL
  
  #define _LIBCPP_ABI_FORCE_ITANIUM 0
  #define _LIBCPP_ABI_FORCE_MICROSOFT 0
+diff --git a/components/password_manager/core/browser/password_form_manager.cc b/components/password_manager/core/browser/password_form_manager.cc
+index 7e8bb30716e17345d4ddea8d7f10002df01148c9..6304a34b30e008da1b96d20af9117f207aece71b 100644
+--- a/components/password_manager/core/browser/password_form_manager.cc
++++ b/components/password_manager/core/browser/password_form_manager.cc
+@@ -41,6 +41,7 @@
+ #include "components/password_manager/core/browser/form_fetcher_impl.h"
+ #include "components/password_manager/core/browser/form_parsing/form_data_parser.h"
+ #include "components/password_manager/core/browser/form_parsing/password_field_prediction.h"
++#include "components/password_manager/core/browser/passkey_credential.h"
+ #include "components/password_manager/core/browser/password_feature_manager.h"
+ #include "components/password_manager/core/browser/password_form.h"
+ #include "components/password_manager/core/browser/password_form_cache.h"
+diff --git a/extensions/common/value_counter.cc b/extensions/common/value_counter.cc
+index 445a73884339dd5c1df06edf2b7d18ec5730690b..68d92f9d63787fda96fbb93c97828cef94dd7676 100644
+--- a/extensions/common/value_counter.cc
++++ b/extensions/common/value_counter.cc
+@@ -31,6 +31,14 @@ ValueCounter::ValueCounter() {
+ ValueCounter::~ValueCounter() {
+ }
+ 
++bool ValueCounter::is_empty() const {
++  return entries_.empty();
++}
++
++size_t ValueCounter::distinct_count() const {
++  return entries_.size();
++}
++
+ bool ValueCounter::Add(const base::Value& value) {
+   ++total_count_;
+   for (auto& entry : entries_) {
+diff --git a/extensions/common/value_counter.h b/extensions/common/value_counter.h
+index 8346f48e1c2cc5a36de3c4f111e0ab65f32e7066..25787535cefb8cac82788dc74dbca715e8d510f9 100644
+--- a/extensions/common/value_counter.h
++++ b/extensions/common/value_counter.h
+@@ -41,13 +41,13 @@ class ValueCounter {
+   bool Remove(const base::Value& value);
+ 
+   // Returns true if there are no values of any type being counted.
+-  bool is_empty() const { return entries_.empty(); }
++  bool is_empty() const;
+ 
+   // Returns the number of values being counted, including duplicates.
+   size_t total_count() const { return total_count_; }
+ 
+   // Returns the number of distinct values being counted.
+-  size_t distinct_count() const { return entries_.size(); }
++  size_t distinct_count() const;
+ 
+  private:
+   struct Entry;

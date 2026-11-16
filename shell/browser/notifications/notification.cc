@@ -22,13 +22,33 @@ NotificationOptions& NotificationOptions::operator=(NotificationOptions&&) =
     default;
 NotificationOptions::~NotificationOptions() = default;
 
+NotificationAction::NotificationAction() = default;
+NotificationAction::~NotificationAction() = default;
+NotificationAction::NotificationAction(const NotificationAction&) = default;
+NotificationAction& NotificationAction::operator=(const NotificationAction&) =
+    default;
+NotificationAction::NotificationAction(NotificationAction&&) noexcept = default;
+NotificationAction& NotificationAction::operator=(
+    NotificationAction&&) noexcept = default;
+
+NotificationInfo::NotificationInfo() = default;
+NotificationInfo::~NotificationInfo() = default;
+NotificationInfo::NotificationInfo(const NotificationInfo&) = default;
+NotificationInfo& NotificationInfo::operator=(const NotificationInfo&) =
+    default;
+NotificationInfo::NotificationInfo(NotificationInfo&&) noexcept = default;
+NotificationInfo& NotificationInfo::operator=(NotificationInfo&&) noexcept =
+    default;
+
 Notification::Notification(NotificationDelegate* delegate,
                            NotificationPresenter* presenter)
     : delegate_(delegate), presenter_(presenter) {}
 
 Notification::~Notification() {
-  if (delegate())
-    delegate()->NotificationDestroyed();
+  auto* delegate = delegate_.get();
+  delegate_ = nullptr;
+  if (delegate)
+    delegate->NotificationDestroyed();
 }
 
 void Notification::NotificationClicked() {
@@ -37,9 +57,10 @@ void Notification::NotificationClicked() {
   Destroy();
 }
 
-void Notification::NotificationDismissed(bool should_destroy) {
+void Notification::NotificationDismissed(bool should_destroy,
+                                         const std::string& close_reason) {
   if (delegate())
-    delegate()->NotificationClosed();
+    delegate()->NotificationClosed(close_reason);
 
   set_is_dismissed(true);
 

@@ -5,15 +5,15 @@
 #ifndef ELECTRON_SHELL_BROWSER_NET_NETWORK_CONTEXT_SERVICE_H_
 #define ELECTRON_SHELL_BROWSER_NET_NETWORK_CONTEXT_SERVICE_H_
 
+#include <memory>
+
 #include "base/memory/raw_ptr.h"
 #include "chrome/browser/net/proxy_config_monitor.h"
 #include "components/keyed_service/core/keyed_service.h"
 #include "services/cert_verifier/public/mojom/cert_verifier_service_factory.mojom-forward.h"
 #include "services/network/public/mojom/network_context.mojom-forward.h"
 
-namespace base {
-class FilePath;
-}  // namespace base
+class CookieEncryptionProviderImpl;
 
 namespace content {
 class BrowserContext;
@@ -38,14 +38,14 @@ class NetworkContextService : public KeyedService {
       cert_verifier::mojom::CertVerifierCreationParams*
           cert_verifier_creation_params);
 
- private:
-  // Creates parameters for the NetworkContext.
-  network::mojom::NetworkContextParamsPtr CreateNetworkContextParams(
-      bool in_memory,
-      const base::FilePath& path);
+  void FlushProxyConfigMonitorForTesting() {
+    proxy_config_monitor_.FlushForTesting();
+  }
 
+ private:
   raw_ptr<ElectronBrowserContext> browser_context_;
   ProxyConfigMonitor proxy_config_monitor_;
+  std::unique_ptr<CookieEncryptionProviderImpl> cookie_encryption_provider_;
 };
 
 }  // namespace electron

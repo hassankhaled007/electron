@@ -4,8 +4,9 @@
 
 Process: [Main](../glossary.md#main-process)
 
-This module does not include a web interface. To view recorded traces, use
-[trace viewer][], available at `chrome://tracing` in Chrome.
+This module does not include a web interface. Traces are recorded in the
+[Perfetto protobuf format][perfetto trace format]; to view them, open them in
+the [Perfetto UI][].
 
 > [!NOTE]
 > You should not use this module until the `ready` event of the app
@@ -14,16 +15,14 @@ This module does not include a web interface. To view recorded traces, use
 ```js
 const { app, contentTracing } = require('electron')
 
-app.whenReady().then(() => {
-  (async () => {
-    await contentTracing.startRecording({
-      included_categories: ['*']
-    })
-    console.log('Tracing started')
-    await new Promise(resolve => setTimeout(resolve, 5000))
-    const path = await contentTracing.stopRecording()
-    console.log('Tracing data recorded to ' + path)
-  })()
+app.whenReady().then(async () => {
+  await contentTracing.startRecording({
+    included_categories: ['*']
+  })
+  console.log('Tracing started')
+  await new Promise((resolve) => setTimeout(resolve, 5000))
+  const path = await contentTracing.stopRecording()
+  console.log('Tracing data recorded to ' + path)
 })
 ```
 
@@ -32,6 +31,15 @@ app.whenReady().then(() => {
 The `contentTracing` module has the following methods:
 
 ### `contentTracing.getCategories()`
+
+<!--
+```YAML history
+changes:
+  - pr-url: https://github.com/electron/electron/pull/16583
+    description: "This method now returns a Promise instead of using a callback function."
+    breaking-changes-header: api-changed-callback-based-versions-of-promisified-apis
+```
+-->
 
 Returns `Promise<string[]>` - resolves with an array of category groups once all child processes have acknowledged the `getCategories` request
 
@@ -44,6 +52,19 @@ are reached. See also the
 
 ### `contentTracing.startRecording(options)`
 
+<!--
+```YAML history
+changes:
+  - pr-url: https://github.com/electron/electron/pull/13914
+    description: "The `options` parameter now accepts `TraceConfig` in addition to `TraceCategoriesAndOptions`."
+  - pr-url: https://github.com/electron/electron/pull/16584
+    description: "This function now returns a callback`Promise<void>`."
+    breaking-changes-header: api-changed-callback-based-versions-of-promisified-apis
+  - pr-url: https://github.com/electron/electron/pull/53349
+    description: "Added the `nativeHeapProfiling` option to enable native heap profiling."
+```
+-->
+
 * `options` ([TraceConfig](structures/trace-config.md) | [TraceCategoriesAndOptions](structures/trace-categories-and-options.md))
 
 Returns `Promise<void>` - resolved once all child processes have acknowledged the `startRecording` request.
@@ -54,9 +75,26 @@ Recording begins immediately locally and asynchronously on child processes
 as soon as they receive the EnableRecording request.
 
 If a recording is already running, the promise will be immediately resolved, as
-only one trace operation can be in progress at a time.
+only one trace operation can be in progress at a time. If `options.nativeHeapProfiling`
+is set while a recording is already running, the promise is rejected instead,
+since the already-running recording's options can't be changed to turn on heap
+profiling.
 
 ### `contentTracing.stopRecording([resultFilePath])`
+
+<!--
+```YAML history
+changes:
+  - pr-url: https://github.com/electron/electron/pull/16584
+    description: "This method now returns a Promise instead of using a callback function."
+    breaking-changes-header: api-changed-callback-based-versions-of-promisified-apis
+  - pr-url: https://github.com/electron/electron/pull/18411
+    description: "The `resultFilePath` parameter is now optional."
+  - pr-url: https://github.com/electron/electron/pull/53349
+    description: "Trace data is now written in the Perfetto protobuf format. The legacy JSON format is no longer supported."
+    breaking-changes-header: behavior-changed-contenttracing-recordings-use-the-perfetto-protobuf-format
+```
+-->
 
 * `resultFilePath` string (optional)
 
@@ -74,7 +112,24 @@ Trace data will be written into `resultFilePath`. If `resultFilePath` is empty
 or not provided, trace data will be written to a temporary file, and the path
 will be returned in the promise.
 
+Trace data is written in the [Perfetto protobuf format][perfetto trace format].
+
+Heap profiling samples record instruction addresses and module build IDs rather
+than function names. To symbolize them, use the symbols published for the
+matching Electron release with Chromium's
+[`symbolize_trace`](https://chromium.googlesource.com/chromium/src/+/main/tools/tracing/README.md)
+tool.
+
 ### `contentTracing.getTraceBufferUsage()`
+
+<!--
+```YAML history
+changes:
+  - pr-url: https://github.com/electron/electron/pull/16600
+    description: "This method now returns a Promise instead of using a callback function."
+    breaking-changes-header: api-changed-callback-based-versions-of-promisified-apis
+```
+-->
 
 Returns `Promise<Object>` - Resolves with an object containing the `value` and `percentage` of trace buffer maximum usage
 
@@ -84,4 +139,5 @@ Returns `Promise<Object>` - Resolves with an object containing the `value` and `
 Get the maximum usage across processes of trace buffer as a percentage of the
 full state.
 
-[trace viewer]: https://chromium.googlesource.com/catapult/+/HEAD/tracing/README.md
+[Perfetto UI]: https://ui.perfetto.dev
+[perfetto trace format]: https://perfetto.dev/docs/reference/trace-packet-proto

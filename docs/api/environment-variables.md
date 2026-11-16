@@ -116,7 +116,9 @@ Don't use the global menu bar on Linux.
 
 ### `ELECTRON_TRASH` _Linux_
 
-Set the trash implementation on Linux. Default is `gio`.
+Set the trash implementation on Linux. Default is `gio` for
+sandboxed environments and non-KDE desktops, and will use
+`kioclient` or `kioclient5` depending on the KDE desktop version.
 
 Options:
 
@@ -159,11 +161,65 @@ Notification activated (com.github.Electron:notification:EAF7B87C-A113-43D7-8E76
 Notification replied to (com.github.Electron:notification:EAF7B87C-A113-43D7-8E76-F88EC9D73D44)
 ```
 
+### `ELECTRON_DEBUG_MSIX_UPDATER`
+
+Adds extra logs to MSIX updater operations on Windows to aid in debugging. Extra logging will be displayed when MSIX update operations are initiated, including package updates, package registration, and restart registration. This helps diagnose issues with MSIX package updates and deployments.
+
+Sample output:
+
+```sh
+UpdateMsix called with URI: https://example.com/app.msix
+DoUpdateMsix: Starting
+Calling AddPackageByUriAsync... URI: https://example.com/app.msix
+Update options - deferRegistration: true, developerMode: false, forceShutdown: false, forceTargetShutdown: false, forceUpdateFromAnyVersion: false
+Waiting for deployment...
+Deployment finished.
+MSIX Deployment completed.
+```
+
+### `ELECTRON_DEBUG_DRAGGABLE_REGIONS` _Experimental_
+
+> [!WARNING]
+> This variable is a debugging aid, not part of Electron's formal API. It is
+> experimental and its behavior, output, or existence may change or be removed
+> in any release without warning.
+
+Visualizes and logs the [draggable regions](../tutorial/custom-window-interactions.md#custom-draggable-regions)
+of every window to aid in debugging custom title bars. Only takes effect when
+[`app.isPackaged`](./app.md#appispackaged-readonly) is `false`.
+
+When set, the region that Electron hit tests against for each `WebContents` (the
+union of every `app-region: drag` rectangle minus every `app-region: no-drag`
+rectangle, as computed by the renderer) is painted as translucent red rectangles
+floating above the web contents, with the parts that changed in the latest update
+tinted yellow. The overlay ignores mouse events and follows the web contents as it
+moves or resizes. It reflects the region the main process actually uses rather than
+the CSS in the page, so it can lag behind the page while regions are in flight
+from the renderer; the stamp in its corner shows which update it is painting.
+
+Extra logs are also written whenever the renderer sends a new set of regions,
+whenever the web contents changes size, and, every couple of seconds, a summary
+of the hit tests served against the region. Logging must be enabled, for example
+with [`ELECTRON_ENABLE_LOGGING`](#electron_enable_logging), for these to be
+displayed.
+
+Sample output:
+
+```sh
+[draggable-regions] webContents 1: debugging enabled
+[draggable-regions] webContents 1: update #1: renderer sent 5 region(s) (1 drag, 4 no-drag); hit-test region computed in 3.2 us: 6 rect(s), bounds 0,0 1200x40
+[draggable-regions] webContents 1: contents view bounds changed to 464,245 1280x720, 8.3 ms since previous bounds change; overlay still shows update #1
+[draggable-regions] webContents 1: update #2, 16.4 ms since previous update, 7.1 ms after last bounds change to 1280x720: renderer sent 5 region(s) (1 drag, 4 no-drag); hit-test region computed in 2.8 us: 6 rect(s), bounds 0,0 1280x40
+[draggable-regions] webContents 1: 143 hit test(s) in the last 2.0 s (37 inside a draggable region), total 41.5 us, avg 0.3 us, max 1.9 us
+```
+
 ### `ELECTRON_LOG_ASAR_READS`
 
 When Electron reads from an ASAR file, log the read offset and file path to
 the system `tmpdir`. The resulting file can be provided to the ASAR module
-to optimize file ordering.
+to optimize file ordering. This variable is read once when each process
+starts, so it must be set in the environment that launches Electron rather
+than from the app's own code.
 
 ### `ELECTRON_ENABLE_STACK_DUMPING`
 
@@ -185,4 +241,24 @@ the one downloaded by `npm install`. Usage:
 
 ```sh
 export ELECTRON_OVERRIDE_DIST_PATH=/Users/username/projects/electron/out/Testing
+```
+
+### `ELECTRON_INSTALL_PLATFORM`
+
+Manually overrides platform used by `electron` package during an install.
+This can be useful if you are on one platform (e.g macOS) but want to
+download binaries for another platform (e.g Windows or Linux). Usage:
+
+```sh
+ELECTRON_INSTALL_PLATFORM=darwin npm install
+```
+
+### `ELECTRON_INSTALL_ARCH`
+
+Manually overrides architecture used by `electron` package during an install.
+This can be useful if you are on one arch (e.g `arm64`) but want to download
+binaries meant for another arch. Note that this will not work under Rosetta. Usage:
+
+```sh
+ELECTRON_INSTALL_ARCH=arm64 npm install
 ```

@@ -44,7 +44,7 @@ following JSON format:
       "updateTo": {
         "version": "1.2.1",
         "pub_date": "2023-09-18T12:29:53+01:00",
-        "notes": "Theses are some release notes innit",
+        "notes": "These are some release notes innit",
         "name": "1.2.1",
         "url": "https://mycompany.example.com/myapp/releases/myrelease"
       }
@@ -54,7 +54,7 @@ following JSON format:
       "updateTo": {
         "version": "1.2.3",
         "pub_date": "2024-09-18T12:29:53+01:00",
-        "notes": "Theses are some more release notes innit",
+        "notes": "These are some more release notes innit",
         "name": "1.2.3",
         "url": "https://mycompany.example.com/myapp/releases/myrelease3"
       }
@@ -221,15 +221,14 @@ Now that you've configured the basic update mechanism for your application, you
 need to ensure that the user will get notified when there's an update. This
 can be achieved using the [autoUpdater API events](../api/auto-updater.md#events):
 
-```js title="main.js" @ts-expect-error=[11]
+```js title="main.js" @ts-expect-error=[10]
 autoUpdater.on('update-downloaded', (event, releaseNotes, releaseName) => {
   const dialogOpts = {
     type: 'info',
     buttons: ['Restart', 'Later'],
     title: 'Application Update',
     message: process.platform === 'win32' ? releaseNotes : releaseName,
-    detail:
-      'A new version has been downloaded. Restart the application to apply the updates.'
+    detail: 'A new version has been downloaded. Restart the application to apply the updates.'
   }
 
   dialog.showMessageBox(dialogOpts).then((returnValue) => {
@@ -307,7 +306,7 @@ app update. All other properties in the object are optional.
 {
     "url": "https://your-static.storage/your-app-1.2.3-darwin.zip",
     "name": "1.2.3",
-    "notes": "Theses are some release notes innit",
+    "notes": "These are some release notes innit",
     "pub_date": "2024-09-18T12:29:53+01:00"
 }
 ```

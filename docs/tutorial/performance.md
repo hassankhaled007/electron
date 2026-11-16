@@ -60,7 +60,7 @@ at once, consider the [Chrome Tracing](https://www.chromium.org/developers/how-t
 ## Checklist: Performance recommendations
 
 Chances are that your app could be a little leaner, faster, and generally less
-resource-hungry if you attempt these steps.
+resource-hungry if you avoid the following common pitfalls.
 
 1. [Carelessly including modules](#1-carelessly-including-modules)
 2. [Loading and running code too soon](#2-loading-and-running-code-too-soon)
@@ -179,11 +179,11 @@ const fs = require('node:fs')
 const fooParser = require('foo-parser')
 
 class Parser {
-  constructor () {
+  constructor() {
     this.files = fs.readdirSync('.')
   }
 
-  getParsedFiles () {
+  getParsedFiles() {
     return fooParser.parse(this.files)
   }
 }
@@ -202,16 +202,16 @@ do this work a little later, when `getParsedFiles()` is actually called?
 const fs = require('node:fs')
 
 class Parser {
-  async getFiles () {
+  async getFiles() {
     // Touch the disk as soon as `getFiles` is called, not sooner.
     // Also, ensure that we're not blocking other operations by using
     // the asynchronous version.
-    this.files = this.files || await fs.promises.readdir('.')
+    this.files = this.files || (await fs.promises.readdir('.'))
 
     return this.files
   }
 
-  async getParsedFiles () {
+  async getParsedFiles() {
     // Our fictitious foo-parser is a big and expensive module to load, so
     // defer that work until we actually need to parse files.
     // Since `require()` comes with a module cache, the `require()` call
@@ -276,7 +276,7 @@ variant.
 
 ### 4. Blocking the renderer process
 
-Since Electron ships with a current version of Chrome, you can make use of the
+Since Electron ships with a current version of Chromium, you can make use of the
 latest and greatest features the Web Platform offers to defer or offload heavy
 operations in a way that keeps your app smooth and responsive.
 
@@ -294,7 +294,7 @@ particularly useful if users complain about your app sometimes "stuttering".
 
 Generally speaking, all advice for building performant web apps for modern
 browsers apply to Electron's renderers, too. The two primary tools at your
-disposal  are currently `requestIdleCallback()` for small operations and
+disposal are currently `requestIdleCallback()` for small operations and
 `Web Workers` for long-running operations.
 
 _`requestIdleCallback()`_ allows developers to queue up a function to be
@@ -360,7 +360,7 @@ turning into a desktop application. As web developers, we are used to loading
 resources from a variety of content delivery networks. Now that you are
 shipping a proper desktop application, attempt to "cut the cord" where possible
 and avoid letting your users wait for resources that never change and could
-easily be included  in your app.
+easily be included in your app.
 
 A typical example is Google Fonts. Many developers make use of Google's
 impressive collection of free fonts, which comes with a content delivery

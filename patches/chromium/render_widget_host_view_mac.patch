@@ -8,10 +8,10 @@ respond to the first mouse click in their window, which is desirable for some
 kinds of utility windows. Similarly for `disableAutoHideCursor`.
 
 diff --git a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
-index d75ec66552525f30b7f916089d688bf31f2f5d4f..98cc3f87ea2c94c6fa59dcfe67785f28c64d9a4e 100644
+index 028fa94b5aa1cf8c7abf6e62397a6ce19a322b3b..330b2fcdcae28fed130ef414cff1ed807e90c965 100644
 --- a/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
 +++ b/content/app_shim_remote_cocoa/render_widget_host_view_cocoa.mm
-@@ -167,6 +167,15 @@ void ExtractUnderlines(NSAttributedString* string,
+@@ -194,6 +194,11 @@ void ExtractUnderlines(NSAttributedString* string,
  
  }  // namespace
  
@@ -20,14 +20,10 @@ index d75ec66552525f30b7f916089d688bf31f2f5d4f..98cc3f87ea2c94c6fa59dcfe67785f28
 +- (BOOL)disableAutoHideCursor;
 +@end
 +
-+@interface NSView (ElectronCustomMethods)
-+- (BOOL)shouldIgnoreMouseEvent;
-+@end
-+
  // RenderWidgetHostViewCocoa ---------------------------------------------------
  
  // Private methods:
-@@ -788,6 +797,10 @@ - (AcceptMouseEvents)acceptsMouseEventsOption {
+@@ -924,6 +929,10 @@ - (AcceptMouseEvents)acceptsMouseEventsOption {
  }
  
  - (BOOL)acceptsFirstMouse:(NSEvent*)theEvent {
@@ -35,19 +31,10 @@ index d75ec66552525f30b7f916089d688bf31f2f5d4f..98cc3f87ea2c94c6fa59dcfe67785f28
 +      [self.window acceptsFirstMouse])
 +    return YES;
 +
-   // Enable "click-through" if mouse clicks are accepted in inactive windows.
-   return
-       [self acceptsMouseEventsOption] > AcceptMouseEvents::kWhenInActiveWindow;
-@@ -940,6 +953,8 @@ - (BOOL)shouldIgnoreMouseEvent:(NSEvent*)theEvent {
-   // its parent view.
-   BOOL hitSelf = NO;
-   while (view) {
-+    if ([view respondsToSelector:@selector(shouldIgnoreMouseEvent)] && ![view shouldIgnoreMouseEvent])
-+      return NO;
-     if (view == self)
-       hitSelf = YES;
-     if ([view isKindOfClass:[self class]] && ![view isEqual:self] &&
-@@ -1274,6 +1289,10 @@ - (void)keyEvent:(NSEvent*)theEvent wasKeyEquivalent:(BOOL)equiv {
+   // A click that another process posts straight to this process does not
+   // activate the app, unlike one the window server routes here, so treating it
+   // as an activation click would only drop it.
+@@ -1605,6 +1614,10 @@ - (void)keyEvent:(NSEvent*)theEvent wasKeyEquivalent:(BOOL)equiv {
                                eventType == NSEventTypeKeyDown &&
                                !(modifierFlags & NSEventModifierFlagCommand);
  

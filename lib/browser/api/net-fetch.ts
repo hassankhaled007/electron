@@ -1,10 +1,14 @@
-import { allowAnyProtocol } from '@electron/internal/common/api/net-client-request';
+import { allowAnyProtocol, toByteString } from '@electron/internal/common/api/net-client-request';
 
 import { ClientRequestConstructorOptions, ClientRequest, IncomingMessage, Session as SessionT } from 'electron/main';
 
 import { Readable, Writable, isReadable } from 'stream';
 
-function createDeferredPromise<T, E extends Error = Error> (): { promise: Promise<T>; resolve: (x: T) => void; reject: (e: E) => void; } {
+function createDeferredPromise<T, E extends Error = Error>(): {
+  promise: Promise<T>;
+  resolve: (x: T) => void;
+  reject: (e: E) => void;
+} {
   let res: (x: T) => void;
   let rej: (e: E) => void;
   const promise = new Promise<T>((resolve, reject) => {
@@ -15,8 +19,12 @@ function createDeferredPromise<T, E extends Error = Error> (): { promise: Promis
   return { promise, resolve: res!, reject: rej! };
 }
 
-export function fetchWithSession (input: RequestInfo, init: (RequestInit & {bypassCustomProtocolHandlers?: boolean}) | undefined, session: SessionT | undefined,
-  request: (options: ClientRequestConstructorOptions | string) => ClientRequest) {
+export function fetchWithSession(
+  input: RequestInfo,
+  init: (RequestInit & { bypassCustomProtocolHandlers?: boolean }) | undefined,
+  session: SessionT | undefined,
+  request: (options: ClientRequestConstructorOptions | string) => ClientRequest
+) {
   const p = createDeferredPromise<Response>();
   let req: Request;
   try {
@@ -76,16 +84,18 @@ export function fetchWithSession (input: RequestInfo, init: (RequestInit & {bypa
   // We can't set credentials to same-origin unless there's an origin set.
   const credentials = req.credentials === 'same-origin' && !origin ? 'include' : req.credentials;
 
-  const r = request(allowAnyProtocol({
-    session,
-    method: req.method,
-    url: req.url,
-    origin,
-    credentials,
-    cache: req.cache,
-    referrerPolicy: req.referrerPolicy,
-    redirect: req.redirect
-  }));
+  const r = request(
+    allowAnyProtocol({
+      session,
+      method: req.method,
+      url: req.url,
+      origin,
+      credentials,
+      cache: req.cache,
+      referrerPolicy: req.referrerPolicy,
+      redirect: req.redirect
+    })
+  );
 
   (r as any)._urlLoaderOptions.bypassCustomProtocolHandlers = !!init?.bypassCustomProtocolHandlers;
 
@@ -100,29 +110,55 @@ export function fetchWithSession (input: RequestInfo, init: (RequestInit & {bypa
 
   r.on('response', (resp: IncomingMessage) => {
     if (locallyAborted) return;
-    const headers = new Headers();
-    for (const [k, v] of Object.entries(resp.headers)) {
-      headers.set(k, Array.isArray(v) ? v.join(', ') : v);
+    try {
+      const headers = new Headers();
+      for (const [k, v] of Object.entries(resp.headers)) {
+        if (Array.isArray(v)) {
+          for (const item of v) {
+            headers.append(k, toByteString(item));
+          }
+        } else if (typeof v === 'string') {
+          headers.set(k, toByteString(v));
+        }
+      }
+      const nullBodyStatus = [101, 204, 205, 304];
+      const body =
+        nullBodyStatus.includes(resp.statusCode) || req.method === 'HEAD'
+          ? null
+          : (Readable.toWeb(resp as unknown as Readable) as ReadableStream);
+      const rResp = new Response(body, {
+        headers,
+        status: resp.statusCode,
+        statusText: resp.statusMessage
+      });
+      (rResp as any).__original_resp = resp;
+      // protocol.handle relays a Response that comes back untouched without
+      // pumping its body through JS; it needs the loader and the exact stream.
+      if (body) (rResp as any).__fetch = { request: r, body: rResp.body };
+      p.resolve(rResp);
+    } catch (err: any) {
+      r.abort();
+      p.reject(err);
     }
-    const nullBodyStatus = [101, 204, 205, 304];
-    const body = nullBodyStatus.includes(resp.statusCode) || req.method === 'HEAD' ? null : Readable.toWeb(resp as unknown as Readable) as ReadableStream;
-    const rResp = new Response(body, {
-      headers,
-      status: resp.statusCode,
-      statusText: resp.statusMessage
-    });
-    (rResp as any).__original_resp = resp;
-    p.resolve(rResp);
   });
 
   r.on('error', (err) => {
     p.reject(err);
   });
 
-  // pipeTo expects a WritableStream<Uint8Array>. Node.js' Writable.toWeb returns WritableStream<any>,
-  // which causes a TS structural mismatch.
-  const writable = Writable.toWeb(r as unknown as Writable) as unknown as WritableStream<Uint8Array>;
-  if (!req.body?.pipeTo(writable).then(() => r.end())) { r.end(); }
+  // Writable.toWeb() has a measurable per-call cost, so only call it when there is a body.
+  if (req.body) {
+    req.body
+      .pipeTo(Writable.toWeb(r as unknown as Writable))
+      .then(() => r.end())
+      .catch((err) => {
+        locallyAborted = true;
+        r.abort();
+        p.reject(err);
+      });
+  } else {
+    r.end();
+  }
 
   return p.promise;
 }

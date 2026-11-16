@@ -8,10 +8,9 @@
 #include <string_view>
 #include <utility>
 
+#include "base/logging.h"
 #include "base/memory/ref_counted_memory.h"
-#include "base/metrics/histogram_functions.h"
 #include "base/strings/strcat.h"
-#include "base/strings/string_number_conversions.h"
 #include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
 #include "chrome/browser/ui/color/chrome_color_id.h"
@@ -109,6 +108,18 @@ void ThemeDataSource::StartDataRequest(
 
 std::string ThemeDataSource::GetMimeType(const GURL& url) {
   return GetMimeTypeForUrl(url);
+}
+
+bool ThemeDataSource::ShouldServiceRequest(
+    const GURL& url,
+    content::BrowserContext* browser_context,
+    int render_process_id) {
+  // DevTools needs colors.css, but no other theme resource should be reachable
+  // from devtools://.
+  if (url.SchemeIs(content::kChromeDevToolsScheme))
+    return url.path() == "/colors.css";
+  return content::URLDataSource::ShouldServiceRequest(url, browser_context,
+                                                      render_process_id);
 }
 
 void ThemeDataSource::SendColorsCss(

@@ -9,15 +9,18 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <variant>
 #include <vector>
 
 #include "base/files/file_path.h"
+#include "base/memory/weak_ptr.h"
 #include "content/public/browser/browser_context.h"
 #include "content/public/browser/media_stream_request.h"
 #include "mojo/public/cpp/bindings/remote.h"
+#include "services/network/public/cpp/url_loader_factory_builder.h"
+#include "services/network/public/mojom/network_context.mojom.h"
 #include "services/network/public/mojom/ssl_config.mojom.h"
+#include "services/network/public/mojom/url_loader_factory.mojom.h"
 #include "third_party/blink/public/common/permissions/permission_utils.h"
 
 class PrefService;
@@ -25,6 +28,7 @@ class ValueMapPrefStore;
 
 namespace content {
 class PreconnectManager;
+class ReconnectableURLLoaderFactory;
 }  // namespace content
 
 namespace gin {
@@ -46,6 +50,7 @@ class ElectronDownloadManagerDelegate;
 class ElectronPermissionManager;
 class ElectronPreconnectManagerDelegate;
 class MediaDeviceIDSalt;
+class InterceptState;
 class ProtocolRegistry;
 class ResolveProxyHelper;
 class WebViewManager;
@@ -67,20 +72,20 @@ class ElectronBrowserContext : public content::BrowserContext {
 
   // Get or create the default BrowserContext.
   static ElectronBrowserContext* GetDefaultBrowserContext(
-      base::Value::Dict options = {});
+      base::DictValue options = {});
 
   // Get or create the BrowserContext according to its |partition| and
   // |in_memory|. The |options| will be passed to constructor when there is no
   // existing BrowserContext.
   static ElectronBrowserContext* From(const std::string& partition,
                                       bool in_memory,
-                                      base::Value::Dict options = {});
+                                      base::DictValue options = {});
 
   // Get or create the BrowserContext using the |path|.
   // The |options| will be passed to constructor when there is no
   // existing BrowserContext.
   static ElectronBrowserContext* FromPath(const base::FilePath& path,
-                                          base::Value::Dict options = {});
+                                          base::DictValue options = {});
 
   static void DestroyAllContexts();
 
@@ -90,7 +95,27 @@ class ElectronBrowserContext : public content::BrowserContext {
   int max_cache_size() const { return max_cache_size_; }
   ResolveProxyHelper* GetResolveProxyHelper();
   content::PreconnectManager* GetPreconnectManager();
-  scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory();
+  scoped_refptr<network::SharedURLLoaderFactory> GetURLLoaderFactory() override;
+
+  // What the IO-thread URLLoaderFactoryGates route to the UI thread; kept in
+  // sync by api::WebRequest and ProtocolRegistry.
+  InterceptState* intercept_state() const { return intercept_state_.get(); }
+  void InterceptedProtocolsChanged();
+  scoped_refptr<network::SharedURLLoaderFactory> InterceptURLLoaderFactory(
+      mojo::PendingRemote<network::mojom::URLLoaderFactory> factory);
+
+  // The net module's factory for file: URLs. Interception is decided per
+  // request, so one factory serves every request in this context.
+  [[nodiscard]] scoped_refptr<network::SharedURLLoaderFactory>
+  GetFileURLLoaderFactory();
+
+  base::WeakPtr<ElectronBrowserContext> GetWeakPtr() {
+    return weak_factory_.GetWeakPtr();
+  }
+
+  std::pair<network::URLLoaderFactoryBuilder,
+            mojo::PendingRemote<network::mojom::TrustedURLLoaderHeaderClient>>
+  CreateURLLoaderFactoryBuilder();
 
   std::string GetMediaDeviceIDSalt();
 
@@ -115,8 +140,6 @@ class ElectronBrowserContext : public content::BrowserContext {
   content::ClientHintsControllerDelegate* GetClientHintsControllerDelegate()
       override;
   content::StorageNotificationService* GetStorageNotificationService() override;
-  content::ReduceAcceptLanguageControllerDelegate*
-  GetReduceAcceptLanguageControllerDelegate() override;
   content::FileSystemAccessPermissionContext*
   GetFileSystemAccessPermissionContext() override;
 
@@ -138,7 +161,8 @@ class ElectronBrowserContext : public content::BrowserContext {
 
   bool ChooseDisplayMediaDevice(const content::MediaStreamRequest& request,
                                 content::MediaResponseCallback callback);
-  void SetDisplayMediaRequestHandler(DisplayMediaRequestHandler handler);
+  void SetDisplayMediaRequestHandler(DisplayMediaRequestHandler handler,
+                                     bool use_system_picker);
 
   ~ElectronBrowserContext() override;
 
@@ -172,9 +196,9 @@ class ElectronBrowserContext : public content::BrowserContext {
 
   ElectronBrowserContext(const PartitionOrPath partition_location,
                          bool in_memory,
-                         base::Value::Dict options);
+                         base::DictValue options);
 
-  ElectronBrowserContext(base::FilePath partition, base::Value::Dict options);
+  ElectronBrowserContext(base::FilePath partition, base::DictValue options);
 
   static void DisplayMediaDeviceChosen(
       const content::MediaStreamRequest& request,
@@ -183,6 +207,11 @@ class ElectronBrowserContext : public content::BrowserContext {
 
   // Initialize pref registry.
   void InitPrefs();
+
+  // Creates a URLLoaderFactory from the default StoragePartition's current
+  // NetworkContext; used by |url_loader_factory_| to (re)connect.
+  void CreateURLLoaderFactory(
+      mojo::PendingRemote<network::mojom::URLLoaderFactory>* out_factory);
 
   scoped_refptr<ValueMapPrefStore> in_memory_pref_store_;
   std::unique_ptr<CookieChangeNotifier> cookie_change_notifier_;
@@ -205,15 +234,21 @@ class ElectronBrowserContext : public content::BrowserContext {
   int max_cache_size_ = 0;
 
   // Shared URLLoaderFactory.
-  scoped_refptr<network::SharedURLLoaderFactory> url_loader_factory_;
+  scoped_refptr<content::ReconnectableURLLoaderFactory> url_loader_factory_;
+  // Created on first use by GetFileURLLoaderFactory().
+  scoped_refptr<network::SharedURLLoaderFactory> file_url_loader_factory_;
+  scoped_refptr<InterceptState> intercept_state_;
 
   network::mojom::SSLConfigPtr ssl_config_;
   mojo::Remote<network::mojom::SSLConfigClient> ssl_config_client_;
 
   DisplayMediaRequestHandler display_media_request_handler_;
+  bool use_system_picker_ = false;
 
   // In-memory cache that holds objects that have been granted permissions.
   DevicePermissionMap granted_devices_;
+
+  base::WeakPtrFactory<ElectronBrowserContext> weak_factory_{this};
 };
 
 }  // namespace electron

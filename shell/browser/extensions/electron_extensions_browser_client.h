@@ -9,15 +9,14 @@
 #include <string>
 #include <vector>
 
+#include "base/memory/scoped_refptr.h"
 #include "content/public/browser/frame_tree_node_id.h"
 #include "extensions/browser/extensions_browser_client.h"
 #include "extensions/browser/kiosk/kiosk_delegate.h"
 #include "extensions/browser/safe_browsing_delegate.h"
+#include "extensions/common/event_args.h"
 #include "services/network/public/cpp/resource_request.h"
 #include "services/network/public/mojom/fetch_api.mojom.h"
-#include "url/origin.h"
-
-class PrefService;
 
 namespace extensions {
 class ExtensionsAPIClient;
@@ -35,6 +34,10 @@ class PendingReceiver;
 template <typename T>
 class PendingRemote;
 }  // namespace mojo
+
+namespace url {
+class Origin;
+}  // namespace url
 
 namespace electron {
 
@@ -67,6 +70,8 @@ class ElectronExtensionsBrowserClient
       content::BrowserContext* context) override;
   content::BrowserContext* GetContextRedirectedToOriginal(
       content::BrowserContext* context) override;
+  content::BrowserContext* GetContextRedirectedToOriginalWithoutAshInternals(
+      content::BrowserContext* context) override;
   content::BrowserContext* GetContextOwnInstance(
       content::BrowserContext* context) override;
   content::BrowserContext* GetContextForOriginalOnly(
@@ -77,9 +82,14 @@ class ElectronExtensionsBrowserClient
   bool IsExtensionIncognitoEnabled(
       const std::string& extension_id,
       content::BrowserContext* context) const override;
+  bool IsExtensionIncognitoEnabled(
+      const extensions::Extension* extension,
+      content::BrowserContext* context) const override;
   bool CanExtensionCrossIncognito(
       const extensions::Extension* extension,
       content::BrowserContext* context) const override;
+  extensions::BrowserContextLifetimeTracker* GetBrowserContextLifetimeTracker()
+      override;
   base::FilePath GetBundleResourcePath(
       const network::ResourceRequest& request,
       const base::FilePath& extension_resources_path,
@@ -90,19 +100,18 @@ class ElectronExtensionsBrowserClient
       const base::FilePath& resource_relative_path,
       int resource_id,
       scoped_refptr<net::HttpResponseHeaders> headers,
-      mojo::PendingRemote<network::mojom::URLLoaderClient> client) override;
+      mojo::PendingRemote<network::mojom::URLLoaderClient> client,
+      content::BrowserContext* browser_context) override;
   bool AllowCrossRendererResourceLoad(
       const network::ResourceRequest& request,
       network::mojom::RequestDestination destination,
       ui::PageTransition page_transition,
-      int child_id,
+      content::ChildProcessId child_id,
       bool is_incognito,
       const extensions::Extension* extension,
       const extensions::ExtensionSet& extensions,
       const extensions::ProcessMap& process_map,
       const GURL& upstream_url) override;
-  PrefService* GetPrefServiceForContext(
-      content::BrowserContext* context) override;
   void GetEarlyExtensionPrefsObservers(
       content::BrowserContext* context,
       std::vector<extensions::EarlyExtensionPrefsObserver*>* observers)
@@ -132,7 +141,7 @@ class ElectronExtensionsBrowserClient
   void BroadcastEventToRenderers(
       extensions::events::HistogramValue histogram_value,
       const std::string& event_name,
-      base::Value::List args,
+      scoped_refptr<const extensions::EventArgs> args,
       bool dispatch_to_off_the_record_profiles) override;
   extensions::ExtensionCache* GetExtensionCache() override;
   bool IsBackgroundUpdateAllowed() override;
@@ -141,6 +150,15 @@ class ElectronExtensionsBrowserClient
       content::WebContents* web_contents) override;
   extensions::ExtensionWebContentsObserver* GetExtensionWebContentsObserver(
       content::WebContents* web_contents) override;
+  bool IsValidTabId(content::BrowserContext* browser_context,
+                    int tab_id,
+                    bool include_incognito,
+                    content::WebContents** web_contents) const override;
+  extensions::ScriptExecutor* GetScriptExecutorForTab(
+      content::WebContents& web_contents) override;
+  void GetTabAndWindowIdForWebContents(content::WebContents* web_contents,
+                                       int* tab_id,
+                                       int* window_id) override;
   extensions::KioskDelegate* GetKioskDelegate() override;
   std::string GetApplicationLocale() override;
   void RegisterBrowserInterfaceBindersForFrame(
@@ -148,9 +166,6 @@ class ElectronExtensionsBrowserClient
       content::RenderFrameHost* render_frame_host,
       const extensions::Extension* extension) const override;
   extensions::SafeBrowsingDelegate* GetSafeBrowsingDelegate() override;
-
-  // Sets the API client.
-  void SetAPIClientForTest(extensions::ExtensionsAPIClient* api_client);
 
  private:
   // Support for extension APIs.

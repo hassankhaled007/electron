@@ -28,10 +28,14 @@ The `Menu` class has the following static methods:
 
 #### `Menu.setApplicationMenu(menu)`
 
-- `menu` Menu | null
+- `menu` [Menu](menu.md) | null
 
 Sets `menu` as the application menu on macOS. On Windows and Linux, the
 `menu` will be set as each window's top menu.
+
+On Linux, the menu bar uses GTK theme colors when GTK is available.
+If GTK cannot initialize, it uses Chromium's built-in light or dark menu colors,
+following `nativeTheme.shouldUseDarkColors`.
 
 Also on Windows and Linux, you can use a `&` in the top-level item name to
 indicate which letter should get a generated accelerator. For example, using
@@ -39,14 +43,14 @@ indicate which letter should get a generated accelerator. For example, using
 opens the associated menu. The indicated character in the button label then gets an
 underline, and the `&` character is not displayed on the button label.
 
-In order to escape the `&` character in an item name, add a proceeding `&`. For example, `&&File` would result in `&File` displayed on the button label.
+In order to escape the `&` character in an item name, add a preceding `&`. For example, `&&File` would result in `&File` displayed on the button label.
 
 Passing `null` will suppress the default menu. On Windows and Linux,
 this has the additional effect of removing the menu bar from the window.
 
 > [!NOTE]
 > The default menu will be created automatically if the app does not set one.
-> It contains standard items such as `File`, `Edit`, `View`, `Window` and `Help`.
+> It contains standard items such as `File`, `Edit`, `View`, and `Window`.
 
 #### `Menu.getApplicationMenu()`
 
@@ -56,6 +60,50 @@ Returns `Menu | null` - The application menu, if set, or `null`, if not set.
 > The returned `Menu` instance doesn't support dynamic addition or
 > removal of menu items. [Instance properties](#instance-properties) can still
 > be dynamically modified.
+
+#### `Menu.setHighlightColors(options)` _Windows_
+
+<!--
+```YAML history
+added:
+  - pr-url: https://github.com/electron/electron/pull/55074
+```
+-->
+
+- `options` Object | null
+  - `light` Object (optional) - Colors used when menus are drawn with light
+    colors.
+    - `background` string (optional) - Background color of the hovered or
+      keyboard-focused menu item, as a CSS color string (e.g. `#0067c0`).
+    - `foreground` string (optional) - Text color of the hovered or
+      keyboard-focused menu item, as a CSS color string.
+  - `dark` Object (optional) - Colors used when menus are drawn with dark
+    colors.
+    - `background` string (optional) - Background color of the hovered or
+      keyboard-focused menu item, as a CSS color string.
+    - `foreground` string (optional) - Text color of the hovered or
+      keyboard-focused menu item, as a CSS color string.
+
+Sets the colors used to highlight the hovered or keyboard-focused item in
+every menu the app shows, including context menus and the menu bar's
+dropdowns. Light and dark colors are set separately, and any color left unset
+keeps the default for that mode. Each call replaces the colors set by any
+previous call. Passing `null` restores the defaults.
+
+```js
+const { Menu } = require('electron')
+
+Menu.setHighlightColors({
+  light: { background: '#0067c0', foreground: '#ffffff' },
+  dark: { background: '#4cc2ff', foreground: '#000000' }
+})
+```
+
+Menus opened after the call use the new colors. The colors are not applied
+while Windows high contrast mode or forced colors are active, so the user's
+system colors take priority.
+
+This method has no effect on macOS and Linux.
 
 #### `Menu.sendActionToFirstResponder(action)` _macOS_
 
@@ -70,9 +118,9 @@ for more information on macOS' native actions.
 
 #### `Menu.buildFromTemplate(template)`
 
-- `template` (MenuItemConstructorOptions | MenuItem)[]
+- `template` ([MenuItemConstructorOptions](menu-item.md#new-menuitemoptions) | [MenuItem](menu-item.md))[]
 
-Returns `Menu`
+Returns [`Menu`](menu.md)
 
 Generally, the `template` is an array of `options` for constructing a
 [MenuItem](menu-item.md). The usage can be referenced above.
@@ -123,7 +171,7 @@ Appends the `menuItem` to the menu.
 
 - `id` string
 
-Returns `MenuItem | null` the item with the specified `id`
+Returns [`MenuItem | null`](menu-item.md) - the item with the specified `id`
 
 #### `menu.insert(pos, menuItem)`
 
@@ -162,7 +210,7 @@ Emitted when a popup is closed either manually or with `menu.closePopup()`.
 
 #### `menu.items`
 
-A `MenuItem[]` array containing the menu's items.
+A [`MenuItem[]`](menu-item.md) array containing the menu's items.
 
 Each `Menu` consists of multiple [`MenuItem`](menu-item.md) instances and each `MenuItem`
 can nest a `Menu` into its `submenu` property.

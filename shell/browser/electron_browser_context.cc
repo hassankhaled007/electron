@@ -9,16 +9,19 @@
 #include <optional>
 #include <utility>
 
-#include "base/barrier_closure.h"
 #include "base/base_paths.h"
 #include "base/command_line.h"
 #include "base/containers/to_vector.h"
 #include "base/files/file_path.h"
+#include "base/memory/ref_counted_delete_on_sequence.h"
+#include "base/memory/weak_ptr.h"
 #include "base/no_destructor.h"
 #include "base/path_service.h"
 #include "base/strings/escape.h"
 #include "base/strings/string_number_conversions.h"
+#include "base/strings/string_split.h"
 #include "base/strings/string_util.h"
+#include "base/task/bind_post_task.h"
 #include "chrome/common/chrome_paths.h"
 #include "chrome/common/pref_names.h"
 #include "components/keyed_service/content/browser_context_dependency_manager.h"
@@ -30,20 +33,27 @@
 #include "components/proxy_config/pref_proxy_config_tracker_impl.h"
 #include "components/proxy_config/proxy_config_pref_names.h"
 #include "content/browser/blob_storage/chrome_blob_storage_context.h"  // nogncheck
+#include "content/browser/loader/reconnectable_url_loader_factory.h"  // nogncheck
 #include "content/public/browser/browser_thread.h"
 #include "content/public/browser/cors_origin_pattern_setter.h"
+#include "content/public/browser/desktop_capture.h"
+#include "content/public/browser/document_user_data.h"
 #include "content/public/browser/host_zoom_map.h"
+#include "content/public/browser/page.h"
 #include "content/public/browser/preconnect_manager.h"
+#include "content/public/browser/render_frame_host.h"
 #include "content/public/browser/render_process_host.h"
-#include "content/public/browser/shared_cors_origin_access_list.h"
 #include "content/public/browser/storage_partition.h"
+#include "content/public/browser/web_contents.h"
 #include "content/public/browser/web_contents_media_capture_id.h"
+#include "content/public/browser/web_contents_observer.h"
 #include "gin/arguments.h"
 #include "media/audio/audio_device_description.h"
 #include "services/network/public/cpp/features.h"
-#include "services/network/public/cpp/url_loader_factory_builder.h"
+#include "services/network/public/cpp/originating_process_id.h"
 #include "services/network/public/cpp/wrapper_shared_url_loader_factory.h"
-#include "services/network/public/mojom/network_context.mojom.h"
+#include "shell/browser/api/electron_api_desktop_capturer.h"
+#include "shell/browser/browser_process_impl.h"
 #include "shell/browser/cookie_change_notifier.h"
 #include "shell/browser/electron_browser_client.h"
 #include "shell/browser/electron_browser_main_parts.h"
@@ -52,7 +62,9 @@
 #include "shell/browser/electron_preconnect_manager_delegate.h"
 #include "shell/browser/file_system_access/file_system_access_permission_context_factory.h"
 #include "shell/browser/media/media_device_id_salt.h"
+#include "shell/browser/net/asar/asar_url_loader_factory.h"
 #include "shell/browser/net/resolve_proxy_helper.h"
+#include "shell/browser/net/url_loader_factory_gate.h"
 #include "shell/browser/protocol_registry.h"
 #include "shell/browser/serial/serial_chooser_context.h"
 #include "shell/browser/special_storage_policy.h"
@@ -94,10 +106,14 @@
 #endif
 
 #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
-#include "base/i18n/rtl.h"
+#include "base/i18n/icubridge/default_icu_locale.h"
 #include "components/language/core/browser/language_prefs.h"
 #include "components/spellcheck/browser/pref_names.h"
 #include "components/spellcheck/common/spellcheck_common.h"
+#endif
+
+#if BUILDFLAG(IS_MAC)
+#include "base/mac/mac_util.h"
 #endif
 
 using content::BrowserThread;
@@ -129,7 +145,8 @@ media::mojom::CaptureHandlePtr CreateCaptureHandle(
     return nullptr;
   }
 
-  const auto& captured_config = captured->GetCaptureHandleConfig();
+  const auto& captured_config =
+      captured->GetPrimaryPage().GetCaptureHandleConfig();
   if (!captured_config.all_origins_permitted &&
       std::ranges::none_of(
           captured_config.permitted_origins,
@@ -141,6 +158,9 @@ media::mojom::CaptureHandlePtr CreateCaptureHandle(
 
   // Observing CaptureHandle when either the capturing or the captured party
   // is incognito is disallowed, except for self-capture.
+  if (!capturer) {
+    return nullptr;
+  }
   if (capturer->GetPrimaryMainFrame() != captured->GetPrimaryMainFrame()) {
     if (capturer->GetBrowserContext()->IsOffTheRecord() ||
         captured->GetBrowserContext()->IsOffTheRecord()) {
@@ -348,18 +368,21 @@ bool ElectronBrowserContext::IsValidContext(const void* context) {
 // static
 void ElectronBrowserContext::DestroyAllContexts() {
   auto& map = ContextMap();
-  // Avoid UAF by destroying the default context last. See ba629e3 for info.
-  const auto extracted = map.extract(PartitionKey{"", false});
+  // Destroy the default context last (see ba629e3) but keep it in the map
+  // meanwhile: the other contexts look it up while they are torn down.
+  std::erase_if(map, [](const auto& entry) {
+    return entry.first != PartitionKey{"", false};
+  });
   map.clear();
 }
 
 ElectronBrowserContext::ElectronBrowserContext(
     const PartitionOrPath partition_location,
     bool in_memory,
-    base::Value::Dict options)
+    base::DictValue options)
     : in_memory_pref_store_(new ValueMapPrefStore),
       storage_policy_(base::MakeRefCounted<SpecialStoragePolicy>()),
-      protocol_registry_(base::WrapUnique(new ProtocolRegistry)),
+      protocol_registry_(base::WrapUnique(new ProtocolRegistry(this))),
       in_memory_(in_memory),
       ssl_config_(network::mojom::SSLConfig::New()) {
   // Read options.
@@ -385,10 +408,15 @@ ElectronBrowserContext::ElectronBrowserContext(
                  std::get_if<std::reference_wrapper<const base::FilePath>>(
                      &partition_location)) {
     const base::FilePath& partition_path = filepath_partition->get();
-    path_ = std::move(partition_path);
+    path_ = partition_path;
   }
 
   BrowserContextDependencyManager::GetInstance()->MarkBrowserContextLive(this);
+  intercept_state_ = base::MakeRefCounted<InterceptState>();
+  intercept_state_->SetIgnoreConnectionsLimitDomains(base::SplitString(
+      base::CommandLine::ForCurrentProcess()->GetSwitchValueASCII(
+          switches::kIgnoreConnectionsLimit),
+      ",", base::TRIM_WHITESPACE, base::SPLIT_WANT_NONEMPTY));
 
   // Initialize Pref Registry.
   InitPrefs();
@@ -410,6 +438,7 @@ ElectronBrowserContext::ElectronBrowserContext(
 
 ElectronBrowserContext::~ElectronBrowserContext() {
   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+
   NotifyWillBeDestroyed();
 
   // Notify any keyed services of browser context destruction.
@@ -426,6 +455,11 @@ void ElectronBrowserContext::InitPrefs() {
       base::MakeRefCounted<JsonPrefStore>(prefs_path);
   pref_store->ReadPrefs();  // Synchronous.
   prefs_factory.set_user_prefs(pref_store);
+
+  // Apply any proxy switches from the command line to this session once, here.
+  // Session::SetProxy() writes to the same store, so applying them again later
+  // would overwrite a proxy the app set with ses.setProxy().
+  BrowserProcessImpl::ApplyProxyModeFromCommandLine(in_memory_pref_store());
   prefs_factory.set_command_line_prefs(in_memory_pref_store());
 
 #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
@@ -479,9 +513,9 @@ void ElectronBrowserContext::InitPrefs() {
   // No configured dictionaries, the default will be en-US
   if (prefs()->GetList(spellcheck::prefs::kSpellCheckDictionaries).empty()) {
     std::string default_code = spellcheck::GetCorrespondingSpellCheckLanguage(
-        base::i18n::GetConfiguredLocale());
+        std::string(base::i18n::GetDefaultIcuLocale().tag_string()));
     if (!default_code.empty()) {
-      base::Value::List language_codes;
+      base::ListValue language_codes;
       language_codes.Append(default_code);
       prefs()->Set(spellcheck::prefs::kSpellCheckDictionaries,
                    base::Value(std::move(language_codes)));
@@ -492,6 +526,11 @@ void ElectronBrowserContext::InitPrefs() {
   // Unique uuid for global shortcuts.
   registry->RegisterStringPref(electron::kElectronGlobalShortcutsUuid,
                                std::string());
+
+#if BUILDFLAG(IS_MAC)
+  registry->RegisterStringPref(electron::kWebAuthnTouchIdMetadataSecretPrefName,
+                               std::string());
+#endif
 }
 
 void ElectronBrowserContext::SetUserAgent(const std::string& user_agent) {
@@ -567,11 +606,9 @@ content::PreconnectManager* ElectronBrowserContext::GetPreconnectManager() {
   return preconnect_manager_.get();
 }
 
-scoped_refptr<network::SharedURLLoaderFactory>
-ElectronBrowserContext::GetURLLoaderFactory() {
-  if (url_loader_factory_)
-    return url_loader_factory_;
-
+std::pair<network::URLLoaderFactoryBuilder,
+          mojo::PendingRemote<network::mojom::TrustedURLLoaderHeaderClient>>
+ElectronBrowserContext::CreateURLLoaderFactoryBuilder() {
   network::URLLoaderFactoryBuilder factory_builder;
 
   // Consult the embedder.
@@ -583,23 +620,68 @@ ElectronBrowserContext::GetURLLoaderFactory() {
           content::ContentBrowserClient::URLLoaderFactoryType::kNavigation,
           url::Origin(), net::IsolationInfo(), std::nullopt,
           ukm::kInvalidSourceIdObj, factory_builder, &header_client, nullptr,
-          nullptr, nullptr, nullptr);
+          nullptr, nullptr, nullptr, /*is_for_network_service=*/false);
+
+  return std::make_pair(std::move(factory_builder), std::move(header_client));
+}
+
+scoped_refptr<network::SharedURLLoaderFactory>
+ElectronBrowserContext::GetURLLoaderFactory() {
+  // Like StoragePartitionImpl's browser process factory, rebuild the factory
+  // whenever the cached one has been disconnected, e.g. after the Network
+  // Service has crashed or restarted.
+  if (!url_loader_factory_) {
+    url_loader_factory_ =
+        base::MakeRefCounted<content::ReconnectableURLLoaderFactory>(
+            base::BindRepeating(&ElectronBrowserContext::CreateURLLoaderFactory,
+                                weak_factory_.GetWeakPtr()));
+  }
+  return url_loader_factory_;
+}
+
+void ElectronBrowserContext::CreateURLLoaderFactory(
+    mojo::PendingRemote<network::mojom::URLLoaderFactory>* out_factory) {
+  DCHECK_CURRENTLY_ON(BrowserThread::UI);
+
+  auto [factory_builder, header_client] = CreateURLLoaderFactoryBuilder();
 
   network::mojom::URLLoaderFactoryParamsPtr params =
       network::mojom::URLLoaderFactoryParams::New();
   params->header_client = std::move(header_client);
-  params->process_id = network::mojom::kBrowserProcessId;
+  params->process_id = network::OriginatingProcessId::browser();
   params->is_trusted = true;
   params->is_orb_enabled = false;
   // The tests of net module would fail if this setting is true, it seems that
   // the non-NetworkService implementation always has web security enabled.
   params->disable_web_security = false;
 
-  auto* storage_partition = GetDefaultStoragePartition();
-  url_loader_factory_ =
+  *out_factory =
       std::move(factory_builder)
-          .Finish(storage_partition->GetNetworkContext(), std::move(params));
-  return url_loader_factory_;
+          .Finish<mojo::PendingRemote<network::mojom::URLLoaderFactory>>(
+              GetDefaultStoragePartition()->GetNetworkContext(),
+              std::move(params));
+}
+
+void ElectronBrowserContext::InterceptedProtocolsChanged() {
+  std::vector<std::string> schemes;
+  for (const auto& [scheme, handler] : protocol_registry_->intercept_handlers())
+    schemes.push_back(scheme);
+  intercept_state_->SetInterceptedSchemes(std::move(schemes));
+}
+
+scoped_refptr<network::SharedURLLoaderFactory>
+ElectronBrowserContext::InterceptURLLoaderFactory(
+    mojo::PendingRemote<network::mojom::URLLoaderFactory> factory) {
+  return CreateURLLoaderFactoryBuilder().first.Finish(std::move(factory));
+}
+
+scoped_refptr<network::SharedURLLoaderFactory>
+ElectronBrowserContext::GetFileURLLoaderFactory() {
+  if (!file_url_loader_factory_) {
+    file_url_loader_factory_ =
+        InterceptURLLoaderFactory(AsarURLLoaderFactory::Create());
+  }
+  return file_url_loader_factory_;
 }
 
 content::PushMessagingService*
@@ -637,13 +719,6 @@ ElectronBrowserContext::GetStorageNotificationService() {
   return nullptr;
 }
 
-content::ReduceAcceptLanguageControllerDelegate*
-ElectronBrowserContext::GetReduceAcceptLanguageControllerDelegate() {
-  // Needs implementation
-  // Refs https://chromium-review.googlesource.com/c/chromium/src/+/3687391
-  return nullptr;
-}
-
 content::FileSystemAccessPermissionContext*
 ElectronBrowserContext::GetFileSystemAccessPermissionContext() {
   return FileSystemAccessPermissionContextFactory::GetForBrowserContext(this);
@@ -673,9 +748,232 @@ void ElectronBrowserContext::SetSSLConfigClient(
 }
 
 void ElectronBrowserContext::SetDisplayMediaRequestHandler(
-    DisplayMediaRequestHandler handler) {
+    DisplayMediaRequestHandler handler,
+    bool use_system_picker) {
   display_media_request_handler_ = handler;
+  use_system_picker_ = use_system_picker;
 }
+
+namespace {
+
+// TYPE_NONE opens a picker that offers windows, applications and screens.
+// 'browser' asks for a tab, which Electron has none of, so it is treated as no
+// preference; displaySurface is a hint and must not fail the request.
+content::DesktopMediaID::Type PickerTypeForRequest(
+    const content::MediaStreamRequest& request) {
+  switch (request.preferred_display_surface) {
+    case blink::mojom::PreferredDisplaySurface::WINDOW:
+      return content::DesktopMediaID::TYPE_WINDOW;
+    case blink::mojom::PreferredDisplaySurface::MONITOR:
+      return content::DesktopMediaID::TYPE_SCREEN;
+    case blink::mojom::PreferredDisplaySurface::BROWSER:
+    case blink::mojom::PreferredDisplaySurface::NO_PREFERENCE:
+#if BUILDFLAG(IS_MAC)
+      // A screen pick is only told apart from a window pick by its display
+      // id, which the picker reports from macOS 15.2.
+      if (base::mac::MacOSVersion() >= 15'02'00)
+        return content::DesktopMediaID::TYPE_NONE;
+#endif
+      return content::DesktopMediaID::TYPE_SCREEN;
+  }
+}
+
+class SystemPickerRequest;
+
+// The native picker is process-wide and rejects an Open() while another one
+// is pending, so requests are turned away here before reaching it.
+SystemPickerRequest* g_pending_system_picker_request = nullptr;
+
+void CloseSystemPickerSession(content::DesktopMediaID::Type type,
+                              content::DesktopMediaID::Id session_id) {
+  content::DesktopMediaID id(type, session_id);
+  id.id_type = content::DesktopMediaID::IdType::kNativePickerSession;
+  content::GetIOThreadTaskRunner({})->PostTask(
+      FROM_HERE,
+      base::BindOnce(&content::desktop_capture::CloseNativeScreenCapturePicker,
+                     id));
+}
+
+// State for one getDisplayMedia() request answered by the system picker.
+// Exactly one of the picker/cancel/error callbacks consumes `callback`; if
+// none does (e.g. the picker went away), the destructor fails the request.
+// SystemPickerRequestOwner fails it when the requesting document goes away.
+class SystemPickerRequest
+    : public base::RefCountedDeleteOnSequence<SystemPickerRequest> {
+ public:
+  SystemPickerRequest(const content::MediaStreamRequest& request,
+                      content::DesktopMediaID::Type type,
+                      content::MediaResponseCallback callback)
+      : base::RefCountedDeleteOnSequence<SystemPickerRequest>(
+            content::GetUIThreadTaskRunner({})),
+        request_(request),
+        type_(type),
+        callback_(std::move(callback)) {}
+
+  void OnCreated(content::DesktopMediaID::Id session_id) {
+    session_id_ = session_id;
+    // Failed before the picker reported its session: close it now, and only
+    // now release the slot, since the picker rejects an Open() until the
+    // close has been posted.
+    if (!callback_) {
+      CloseSystemPickerSession(type_, session_id);
+      ClearPending();
+    }
+  }
+
+  // For the picker's own cancel/error callbacks: no session will follow.
+  void FailFromPicker(blink::mojom::MediaStreamRequestResult result) {
+    picker_done_ = true;
+    Fail(result);
+  }
+
+  void OnSelected(webrtc::DesktopCapturer::Source source) {
+    if (!callback_)
+      return;
+    // A crashed renderer keeps its document until the next navigation, so
+    // close the session rather than answer a request nobody is waiting on.
+    auto* rfh = content::RenderFrameHost::FromID(request_.render_process_id,
+                                                 request_.render_frame_id);
+    if (!rfh || !rfh->IsRenderFrameLive()) {
+      Fail(
+          blink::mojom::MediaStreamRequestResult::FAILED_DUE_TO_SHUTDOWN_OTHER);
+      return;
+    }
+    // Only a screen pick has a display id; an application pick counts as a
+    // window, the closest displaySurface.
+    picked_type_ = type_ != content::DesktopMediaID::TYPE_NONE ? type_
+                   : source.display_id != webrtc::kInvalidDisplayId
+                       ? content::DesktopMediaID::TYPE_SCREEN
+                       : content::DesktopMediaID::TYPE_WINDOW;
+    content::DesktopMediaID media_id(picked_type_, source.id);
+    // Serializes with a ":s" suffix so the capture launcher hands the id back
+    // to the native picker instead of treating it as a CGWindowID/display id.
+    media_id.id_type = content::DesktopMediaID::IdType::kNativePickerSession;
+    blink::MediaStreamDevice video_device(request_.video_type,
+                                          media_id.ToString(), "Screen");
+    video_device.display_media_info = DesktopMediaIDToDisplayMediaInformation(
+        nullptr, url::Origin::Create(request_.security_origin), media_id);
+
+    blink::mojom::StreamDevicesSet stream_devices_set;
+    stream_devices_set.stream_devices.emplace_back(
+        blink::mojom::StreamDevices::New());
+    stream_devices_set.stream_devices[0]->video_device = video_device;
+    if (GrantsSystemAudio()) {
+      // Same loopback device Chrome picks for a system-audio share
+      // (GetAudioDeviceId in desktop_capture_devices_util.cc).
+      std::string audio_id =
+          request_.restrict_own_audio
+              ? media::AudioDeviceDescription::kLoopbackWithoutChromeId
+          : request_.suppress_local_audio_playback
+              ? media::AudioDeviceDescription::kLoopbackWithMuteDeviceId
+              : media::AudioDeviceDescription::kLoopbackInputDeviceId;
+      blink::MediaStreamDevice audio_device(request_.audio_type, audio_id,
+                                            "System audio");
+      audio_device.display_media_info = video_device.display_media_info.Clone();
+      stream_devices_set.stream_devices[0]->audio_device = audio_device;
+    }
+    ClearPending();
+    std::move(callback_).Run(stream_devices_set,
+                             blink::mojom::MediaStreamRequestResult::OK,
+                             nullptr);
+  }
+
+  // Chrome's GetWindowCaptureAudioType, minus per-app "window" audio: that
+  // needs the window's pid, which the picker doesn't expose.
+  bool GrantsSystemAudio() const {
+    if (request_.audio_type == blink::mojom::MediaStreamType::NO_SERVICE)
+      return false;
+    if (picked_type_ == content::DesktopMediaID::TYPE_SCREEN)
+      return !request_.exclude_system_audio;
+    return request_.window_audio_preference ==
+           blink::mojom::WindowAudioPreference::kSystem;
+  }
+
+  void Fail(blink::mojom::MediaStreamRequestResult result) {
+    if (!callback_)
+      return;
+    // Mirrors DelegatedSourceListCapturer: a session that never produced a
+    // stream must be closed or the picker stays active.
+    if (session_id_)
+      CloseSystemPickerSession(type_, *session_id_);
+    // Keep the slot while an Open() is in flight; OnCreated releases it.
+    if (session_id_ || picker_done_)
+      ClearPending();
+    std::move(callback_).Run(blink::mojom::StreamDevicesSet(), result, nullptr);
+  }
+
+  void SetPending() { g_pending_system_picker_request = this; }
+
+  content::DesktopMediaID::Type type() const { return type_; }
+
+  base::WeakPtr<SystemPickerRequest> GetWeakPtr() {
+    return weak_factory_.GetWeakPtr();
+  }
+
+ private:
+  friend class base::RefCountedDeleteOnSequence<SystemPickerRequest>;
+  friend class base::DeleteHelper<SystemPickerRequest>;
+
+  ~SystemPickerRequest() {
+    // The picker dropped its callbacks, so nothing is in flight any more.
+    FailFromPicker(
+        blink::mojom::MediaStreamRequestResult::FAILED_DUE_TO_SHUTDOWN_OTHER);
+    ClearPending();
+  }
+
+  void ClearPending() {
+    if (g_pending_system_picker_request == this)
+      g_pending_system_picker_request = nullptr;
+  }
+
+  const content::MediaStreamRequest request_;
+  const content::DesktopMediaID::Type type_;
+  content::DesktopMediaID::Type picked_type_ =
+      content::DesktopMediaID::TYPE_NONE;
+  content::MediaResponseCallback callback_;
+  std::optional<content::DesktopMediaID::Id> session_id_;
+  bool picker_done_ = false;
+  base::WeakPtrFactory<SystemPickerRequest> weak_factory_{this};
+};
+
+// Lives as long as the requesting document, so navigating away or closing the
+// frame fails a request the picker hasn't answered and closes its session.
+class SystemPickerRequestOwner
+    : public content::DocumentUserData<SystemPickerRequestOwner>,
+      public content::WebContentsObserver {
+ public:
+  ~SystemPickerRequestOwner() override { FailRequest(); }
+
+  // DocumentUserData outlives a crashed renderer until the next navigation
+  // (crbug.com/1099237), so the crash itself has to free the picker.
+  void RenderFrameDeleted(content::RenderFrameHost* rfh) override {
+    if (rfh == &render_frame_host())
+      FailRequest();
+  }
+
+ private:
+  friend class content::DocumentUserData<SystemPickerRequestOwner>;
+  DOCUMENT_USER_DATA_KEY_DECL();
+
+  SystemPickerRequestOwner(content::RenderFrameHost* rfh,
+                           base::WeakPtr<SystemPickerRequest> request)
+      : DocumentUserData(rfh),
+        WebContentsObserver(content::WebContents::FromRenderFrameHost(rfh)),
+        request_(std::move(request)) {}
+
+  void FailRequest() {
+    if (request_)
+      request_->Fail(
+          blink::mojom::MediaStreamRequestResult::FAILED_DUE_TO_SHUTDOWN_OTHER);
+    request_.reset();
+  }
+
+  base::WeakPtr<SystemPickerRequest> request_;
+};
+
+DOCUMENT_USER_DATA_KEY_IMPL(SystemPickerRequestOwner);
+
+}  // namespace
 
 void ElectronBrowserContext::DisplayMediaDeviceChosen(
     const content::MediaStreamRequest& request,
@@ -685,9 +983,10 @@ void ElectronBrowserContext::DisplayMediaDeviceChosen(
       blink::mojom::StreamDevicesSet::New();
   v8::Local<v8::Value> result;
   if (!args->GetNext(&result) || result->IsNullOrUndefined()) {
-    std::move(callback).Run(
-        blink::mojom::StreamDevicesSet(),
-        blink::mojom::MediaStreamRequestResult::CAPTURE_FAILURE, nullptr);
+    std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                            blink::mojom::MediaStreamRequestResult::
+                                INVALID_DISPLAY_CAPTURE_CONSTRAINTS,
+                            nullptr);
     return;
   }
   gin_helper::Dictionary result_dict;
@@ -695,11 +994,36 @@ void ElectronBrowserContext::DisplayMediaDeviceChosen(
     args->ThrowTypeError(
         "Display Media Request streams callback must be called with null "
         "or a valid object");
-    std::move(callback).Run(
-        blink::mojom::StreamDevicesSet(),
-        blink::mojom::MediaStreamRequestResult::CAPTURE_FAILURE, nullptr);
+    std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                            blink::mojom::MediaStreamRequestResult::
+                                INVALID_DISPLAY_CAPTURE_CONSTRAINTS,
+                            nullptr);
     return;
   }
+  // The WebContents that called getDisplayMedia(). Capture handles, zoom
+  // level and the incognito check are computed relative to it.
+  content::WebContents* capturer = content::WebContents::FromRenderFrameHost(
+      content::RenderFrameHost::FromID(request.render_process_id,
+                                       request.render_frame_id));
+  if (!capturer) {
+    std::move(callback).Run(
+        blink::mojom::StreamDevicesSet(),
+        blink::mojom::MediaStreamRequestResult::INVALID_STATE, nullptr);
+    return;
+  }
+  const url::Origin capturer_origin =
+      url::Origin::Create(request.security_origin);
+  // A WebFrameMain passed as `video` / `audio` selects the WebContents that
+  // contains it; content captures whole tabs, not individual frames.
+  auto tab_capture_id = [](content::RenderFrameHost* rfh,
+                           bool disable_local_echo = false) {
+    content::RenderFrameHost* main_frame = rfh->GetOutermostMainFrame();
+    return content::WebContentsMediaCaptureId(
+               main_frame->GetProcess()->GetDeprecatedID(),
+               main_frame->GetRoutingID(), disable_local_echo)
+        .ToString();
+  };
+
   stream_devices_set->stream_devices.emplace_back(
       blink::mojom::StreamDevices::New());
   blink::mojom::StreamDevices& devices = *stream_devices_set->stream_devices[0];
@@ -715,29 +1039,48 @@ void ElectronBrowserContext::DisplayMediaDeviceChosen(
     content::RenderFrameHost* rfh;
     if (result_dict.Get("video", &video_dict) && video_dict.Get("id", &id) &&
         video_dict.Get("name", &name)) {
+      const auto media_id = content::DesktopMediaID::Parse(id);
+#if BUILDFLAG(IS_MAC)
+      // On macOS only useSystemPicker issues picker session ids; one passed
+      // back through the handler may have come from a renderer.
+      if (media_id.id_type ==
+          content::DesktopMediaID::IdType::kNativePickerSession) {
+        args->ThrowTypeError("video.id is not a valid source id");
+        std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                                blink::mojom::MediaStreamRequestResult::
+                                    INVALID_DISPLAY_CAPTURE_CONSTRAINTS,
+                                nullptr);
+        return;
+      }
+#endif
       blink::MediaStreamDevice video_device(request.video_type, id, name);
       video_device.display_media_info = DesktopMediaIDToDisplayMediaInformation(
-          nullptr, url::Origin::Create(request.security_origin),
-          content::DesktopMediaID::Parse(video_device.id));
+          capturer, capturer_origin, media_id);
       devices.video_device = video_device;
     } else if (result_dict.Get("video", &rfh)) {
-      auto* web_contents = content::WebContents::FromRenderFrameHost(rfh);
+      if (!rfh) {
+        args->ThrowTypeError("video refers to a frame that has been destroyed");
+        std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                                blink::mojom::MediaStreamRequestResult::
+                                    INVALID_DISPLAY_CAPTURE_CONSTRAINTS,
+                                nullptr);
+        return;
+      }
+      auto* captured = content::WebContents::FromRenderFrameHost(rfh);
       blink::MediaStreamDevice video_device(
-          request.video_type,
-          content::WebContentsMediaCaptureId(
-              rfh->GetProcess()->GetDeprecatedID(), rfh->GetRoutingID())
-              .ToString(),
-          base::UTF16ToUTF8(web_contents->GetTitle()));
+          request.video_type, tab_capture_id(rfh),
+          base::UTF16ToUTF8(captured->GetTitle()));
       video_device.display_media_info = DesktopMediaIDToDisplayMediaInformation(
-          web_contents, url::Origin::Create(request.security_origin),
+          capturer, capturer_origin,
           content::DesktopMediaID::Parse(video_device.id));
       devices.video_device = video_device;
     } else {
       args->ThrowTypeError(
           "video must be a WebFrameMain or DesktopCapturerSource");
-      std::move(callback).Run(
-          blink::mojom::StreamDevicesSet(),
-          blink::mojom::MediaStreamRequestResult::CAPTURE_FAILURE, nullptr);
+      std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                              blink::mojom::MediaStreamRequestResult::
+                                  INVALID_DISPLAY_CAPTURE_CONSTRAINTS,
+                              nullptr);
       return;
     }
     has_video = true;
@@ -754,39 +1097,51 @@ void ElectronBrowserContext::DisplayMediaDeviceChosen(
         audio_dict.Get("name", &name)) {
       blink::MediaStreamDevice audio_device(request.audio_type, id, name);
       audio_device.display_media_info = DesktopMediaIDToDisplayMediaInformation(
-          nullptr, url::Origin::Create(request.security_origin),
+          capturer, capturer_origin,
           GetAudioDesktopMediaId(request.requested_audio_device_ids));
       devices.audio_device = audio_device;
     } else if (result_dict.Get("audio", &rfh)) {
+      if (!rfh) {
+        args->ThrowTypeError("audio refers to a frame that has been destroyed");
+        std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                                blink::mojom::MediaStreamRequestResult::
+                                    INVALID_DISPLAY_CAPTURE_CONSTRAINTS,
+                                nullptr);
+        return;
+      }
       const bool enable_local_echo =
           result_dict.ValueOrDefault("enableLocalEcho", false);
-      const bool disable_local_echo = !enable_local_echo;
-      auto* web_contents = content::WebContents::FromRenderFrameHost(rfh);
       blink::MediaStreamDevice audio_device(
           request.audio_type,
-          content::WebContentsMediaCaptureId(
-              rfh->GetProcess()->GetDeprecatedID(), rfh->GetRoutingID(),
-              disable_local_echo)
-              .ToString(),
+          tab_capture_id(rfh, /*disable_local_echo=*/!enable_local_echo),
           "Tab audio");
       audio_device.display_media_info = DesktopMediaIDToDisplayMediaInformation(
-          web_contents, url::Origin::Create(request.security_origin),
+          capturer, capturer_origin,
           GetAudioDesktopMediaId(request.requested_audio_device_ids));
       devices.audio_device = audio_device;
     } else if (result_dict.Get("audio", &id)) {
+      if (request.restrict_own_audio &&
+          id == media::AudioDeviceDescription::kLoopbackInputDeviceId) {
+#if BUILDFLAG(IS_MAC) || BUILDFLAG(IS_WIN) || BUILDFLAG(IS_CHROMEOS)
+        id = media::AudioDeviceDescription::kLoopbackWithoutChromeId;
+#else
+        id = media::AudioDeviceDescription::kLoopbackInputDeviceId;
+#endif
+      }
       blink::MediaStreamDevice audio_device(request.audio_type, id,
                                             "System audio");
       audio_device.display_media_info = DesktopMediaIDToDisplayMediaInformation(
-          nullptr, url::Origin::Create(request.security_origin),
+          capturer, capturer_origin,
           GetAudioDesktopMediaId(request.requested_audio_device_ids));
       devices.audio_device = audio_device;
     } else {
       args->ThrowTypeError(
           "audio must be a WebFrameMain, \"loopback\" or "
           "\"loopbackWithMute\"");
-      std::move(callback).Run(
-          blink::mojom::StreamDevicesSet(),
-          blink::mojom::MediaStreamRequestResult::CAPTURE_FAILURE, nullptr);
+      std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                              blink::mojom::MediaStreamRequestResult::
+                                  INVALID_DISPLAY_CAPTURE_CONSTRAINTS,
+                              nullptr);
       return;
     }
   }
@@ -794,9 +1149,10 @@ void ElectronBrowserContext::DisplayMediaDeviceChosen(
   if ((video_requested && !has_video)) {
     args->ThrowTypeError(
         "Video was requested, but no video stream was provided");
-    std::move(callback).Run(
-        blink::mojom::StreamDevicesSet(),
-        blink::mojom::MediaStreamRequestResult::CAPTURE_FAILURE, nullptr);
+    std::move(callback).Run(blink::mojom::StreamDevicesSet(),
+                            blink::mojom::MediaStreamRequestResult::
+                                INVALID_DISPLAY_CAPTURE_CONSTRAINTS,
+                            nullptr);
     return;
   }
 
@@ -807,6 +1163,51 @@ void ElectronBrowserContext::DisplayMediaDeviceChosen(
 bool ElectronBrowserContext::ChooseDisplayMediaDevice(
     const content::MediaStreamRequest& request,
     content::MediaResponseCallback callback) {
+  if (use_system_picker_ &&
+      api::DesktopCapturer::IsDisplayMediaSystemPickerAvailable()) {
+    // Route useSystemPicker: true through upstream's
+    // NativeScreenCapturePickerMac, which owns the system picker lifecycle and
+    // issues source ids. The JS handler is bypassed (documented behavior).
+    // One picker at a time, matching Chromium: a request made while the
+    // picker is open is turned away and the open picker keeps its request.
+    auto* rfh = content::RenderFrameHost::FromID(request.render_process_id,
+                                                 request.render_frame_id);
+    if (g_pending_system_picker_request || !rfh) {
+      std::move(callback).Run(
+          blink::mojom::StreamDevicesSet(),
+          blink::mojom::MediaStreamRequestResult::INVALID_STATE, nullptr);
+      return true;
+    }
+    auto state = base::MakeRefCounted<SystemPickerRequest>(
+        request, PickerTypeForRequest(request), std::move(callback));
+    state->SetPending();
+    if (SystemPickerRequestOwner::GetForCurrentDocument(rfh))
+      SystemPickerRequestOwner::DeleteForCurrentDocument(rfh);
+    SystemPickerRequestOwner::CreateForCurrentDocument(rfh,
+                                                       state->GetWeakPtr());
+    auto runner = content::GetUIThreadTaskRunner({});
+    content::GetIOThreadTaskRunner({})->PostTask(
+        FROM_HERE,
+        base::BindOnce(
+            &content::desktop_capture::OpenNativeScreenCapturePicker,
+            state->type(),
+            base::BindPostTask(
+                runner, base::BindOnce(&SystemPickerRequest::OnCreated, state)),
+            base::BindPostTask(
+                runner,
+                base::BindOnce(&SystemPickerRequest::OnSelected, state)),
+            base::BindPostTask(
+                runner,
+                base::BindOnce(
+                    &SystemPickerRequest::FailFromPicker, state,
+                    blink::mojom::MediaStreamRequestResult::PERMISSION_DENIED)),
+            base::BindPostTask(
+                runner,
+                base::BindOnce(&SystemPickerRequest::FailFromPicker, state,
+                               blink::mojom::MediaStreamRequestResult::
+                                   FAILED_DUE_TO_SHUTDOWN_OTHER))));
+    return true;
+  }
   if (!display_media_request_handler_)
     return false;
   DisplayMediaResponseCallbackJs callbackJs =
@@ -865,7 +1266,7 @@ bool ElectronBrowserContext::CheckDevicePermission(
 ElectronBrowserContext* ElectronBrowserContext::From(
     const std::string& partition,
     bool in_memory,
-    base::Value::Dict options) {
+    base::DictValue options) {
   auto& context = ContextMap()[PartitionKey(partition, in_memory)];
   if (!context) {
     context.reset(new ElectronBrowserContext{std::cref(partition), in_memory,
@@ -876,13 +1277,13 @@ ElectronBrowserContext* ElectronBrowserContext::From(
 
 // static
 ElectronBrowserContext* ElectronBrowserContext::GetDefaultBrowserContext(
-    base::Value::Dict options) {
+    base::DictValue options) {
   return ElectronBrowserContext::From("", false, std::move(options));
 }
 
 ElectronBrowserContext* ElectronBrowserContext::FromPath(
     const base::FilePath& path,
-    base::Value::Dict options) {
+    base::DictValue options) {
   auto& context = ContextMap()[PartitionKey(path)];
   if (!context) {
     context.reset(

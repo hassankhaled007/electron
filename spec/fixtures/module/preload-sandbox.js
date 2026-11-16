@@ -1,11 +1,9 @@
 (function () {
-  const { setImmediate } = require('node:timers');
   const { ipcRenderer } = require('electron');
   window.ipcRenderer = ipcRenderer;
-  window.setImmediate = setImmediate;
   window.require = require;
 
-  function invoke (code) {
+  function invoke(code) {
     try {
       return code();
     } catch {
@@ -28,17 +26,19 @@
         creationTime: invoke(() => process.getCreationTime()),
         heapStatistics: invoke(() => process.getHeapStatistics()),
         blinkMemoryInfo: invoke(() => process.getBlinkMemoryInfo()),
-        processMemoryInfo: invoke(() => process.getProcessMemoryInfo() ? {} : null),
+        processMemoryInfo: invoke(() => (process.getProcessMemoryInfo() ? {} : null)),
         systemMemoryInfo: invoke(() => process.getSystemMemoryInfo()),
         systemVersion: invoke(() => process.getSystemVersion()),
         cpuUsage: invoke(() => process.getCPUUsage()),
         uptime: invoke(() => process.uptime()),
-        // eslint-disable-next-line import/enforce-node-protocol-usage
-        nodeEvents: invoke(() => require('events') === require('node:events')),
-        // eslint-disable-next-line import/enforce-node-protocol-usage
-        nodeTimers: invoke(() => require('timers') === require('node:timers')),
-        // eslint-disable-next-line import/enforce-node-protocol-usage
-        nodeUrl: invoke(() => require('url') === require('node:url')),
+        // Node.js module shims and globals are not provided to sandboxed preloads.
+        requirableNodeModules: ['events', 'node:events', 'timers', 'node:timers', 'url', 'node:url'].filter(
+          (name) => invoke(() => require(name)) !== null
+        ),
+        typeofBuffer: typeof Buffer,
+        typeofSetImmediate: typeof setImmediate,
+        typeofClearImmediate: typeof clearImmediate,
+        typeofGlobal: typeof global,
         env: process.env,
         execPath: process.execPath,
         pid: process.pid,
@@ -57,7 +57,7 @@
       ipcRenderer.on('touch-the-opener', () => {
         let errorMessage = null;
         try {
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          // oxlint-disable-next-line @typescript-eslint/no-unused-vars
           const openerDoc = opener.document;
         } catch (error) {
           errorMessage = error.message;

@@ -3,14 +3,19 @@
 // found in the LICENSE file.
 
 #include <iterator>
+#include <string>
 #include <utility>
 
+#include "base/dcheck_is_on.h"
+#include "base/functional/bind.h"
+#include "base/location.h"
+#include "base/process/process.h"
 #include "base/run_loop.h"
-#include "electron/buildflags/buildflags.h"
-#include "shell/common/gin_converters/content_converter.h"
-#include "shell/common/gin_converters/gurl_converter.h"
-#include "shell/common/gin_converters/std_converter.h"
+#include "base/task/bind_post_task.h"
+#include "base/task/sequenced_task_runner.h"
+#include "gin/arguments.h"
 #include "shell/common/gin_helper/dictionary.h"
+#include "shell/common/gin_helper/promise.h"
 #include "shell/common/node_includes.h"
 #include "url/origin.h"
 #include "v8/include/v8-profiler.h"
@@ -66,17 +71,52 @@ void SetHiddenValue(v8::Isolate* isolate,
   object->SetPrivate(context, privateKey, value);
 }
 
-int32_t GetObjectHash(v8::Local<v8::Object> object) {
-  return object->GetIdentityHash();
-}
-
 void TakeHeapSnapshot(v8::Isolate* isolate) {
   isolate->GetHeapProfiler()->TakeHeapSnapshot();
 }
 
-void RequestGarbageCollectionForTesting(v8::Isolate* isolate) {
-  isolate->RequestGarbageCollectionForTesting(
-      v8::Isolate::GarbageCollectionType::kFullGarbageCollection);
+// requestGarbageCollectionForTesting([{ execution: 'sync' | 'async' }])
+//
+// Forces a full garbage collection. The default ('sync') collects immediately,
+// which means the native stack is scanned conservatively: any word on it that
+// looks like a pointer into the C++ (cppgc) heap keeps that object alive, and a
+// stale pointer left behind by an earlier native frame is enough. That makes a
+// synchronous request unsuitable for asserting that an unreferenced C++ object
+// is reclaimed. With { execution: 'async' } the collection instead runs from a
+// fresh non-nestable task, where the stack holds no heap pointers and is not
+// scanned. This mirrors `gc({ type: 'major', execution: 'async' })` from
+// --expose-gc.
+v8::Local<v8::Value> RequestGarbageCollectionForTesting(gin::Arguments* args) {
+  v8::Isolate* isolate = args->isolate();
+  std::string execution;
+  gin_helper::Dictionary options;
+  if (args->GetNext(&options))
+    options.Get("execution", &execution);
+  if (execution != "async") {
+    isolate->RequestGarbageCollectionForTesting(
+        v8::Isolate::GarbageCollectionType::kFullGarbageCollection);
+    return v8::Undefined(isolate);
+  }
+
+  gin_helper::Promise<void> promise(isolate);
+  v8::Local<v8::Promise> handle = promise.GetHandle();
+  // Wrapper destructors queue their NativePeer during cppgc sweeping via
+  // PostNonNestableTask(ReleaseAndDeleteQueuedPeers). Bind the reply to the
+  // current sequence so promise.Resolve() is posted after the GC task (and any
+  // peer teardown tasks it queued) rather than running before them.
+  base::SequencedTaskRunner::GetCurrentDefault()->PostNonNestableTask(
+      FROM_HERE,
+      base::BindOnce(
+          [](v8::Isolate* isolate) {
+            isolate->RequestGarbageCollectionForTesting(
+                v8::Isolate::GarbageCollectionType::kFullGarbageCollection,
+                v8::StackState::kNoHeapPointers);
+          },
+          base::Unretained(isolate))
+          .Then(base::BindPostTaskToCurrentDefault(
+              base::BindOnce(&gin_helper::Promise<void>::ResolvePromise,
+                             std::move(promise)))));
+  return handle;
 }
 
 // This causes a fatal error by creating a circular extension dependency.
@@ -95,20 +135,46 @@ void RunUntilIdle() {
   base::RunLoop().RunUntilIdle();
 }
 
+// Ends the process now with the given exit code, running no atexit handlers
+// or static destructors. The asar fs wrapper calls this on an integrity
+// violation: libc exit() would tear down statics while Chromium's threads are
+// still live, which intermittently faults (0xC0000005 on Windows).
+void ExitImmediately(gin::Arguments* args) {
+  int code = 1;
+  args->GetNext(&code);
+  base::Process::TerminateCurrentProcessImmediately(code);
+}
+
+#if DCHECK_IS_ON()
+// Test-only (DCHECK builds): per-process map of builtin id
+// (internal/electron/js2c/* bundles and Node's own lib/ builtins compiled so
+// far in this process) -> whether its build-time/snapshot code cache was
+// consumed. Backs the code-cache spec.
+v8::Local<v8::Value> GetJs2cCodeCacheStatus(v8::Isolate* isolate) {
+  gin_helper::Dictionary dict = gin_helper::Dictionary::CreateEmpty(isolate);
+  for (const auto& [id, accepted] : node::builtins::ElectronJs2cCacheStatus())
+    dict.Set(id, accepted);
+  return dict.GetHandle();
+}
+#endif
+
 void Initialize(v8::Local<v8::Object> exports,
                 v8::Local<v8::Value> unused,
                 v8::Local<v8::Context> context,
                 void* priv) {
   v8::Isolate* const isolate = v8::Isolate::GetCurrent();
   gin_helper::Dictionary dict{isolate, exports};
-  dict.SetMethod("getHiddenValue", &GetHiddenValue);
-  dict.SetMethod("setHiddenValue", &SetHiddenValue);
-  dict.SetMethod("getObjectHash", &GetObjectHash);
-  dict.SetMethod("takeHeapSnapshot", &TakeHeapSnapshot);
-  dict.SetMethod("requestGarbageCollectionForTesting",
-                 &RequestGarbageCollectionForTesting);
-  dict.SetMethod("triggerFatalErrorForTesting", &TriggerFatalErrorForTesting);
-  dict.SetMethod("runUntilIdle", &RunUntilIdle);
+  dict.SetMethod<&GetHiddenValue>("getHiddenValue");
+  dict.SetMethod<&SetHiddenValue>("setHiddenValue");
+  dict.SetMethod<&TakeHeapSnapshot>("takeHeapSnapshot");
+  dict.SetMethod<&RequestGarbageCollectionForTesting>(
+      "requestGarbageCollectionForTesting");
+  dict.SetMethod<&TriggerFatalErrorForTesting>("triggerFatalErrorForTesting");
+  dict.SetMethod<&RunUntilIdle>("runUntilIdle");
+  dict.SetMethod<&ExitImmediately>("exitImmediately");
+#if DCHECK_IS_ON()
+  dict.SetMethod<&GetJs2cCodeCacheStatus>("getJs2cCodeCacheStatus");
+#endif
 }
 
 }  // namespace

@@ -30,6 +30,19 @@ class ElectronDesktopWindowTreeHostWin : public views::DesktopWindowTreeHostWin,
   ElectronDesktopWindowTreeHostWin& operator=(
       const ElectronDesktopWindowTreeHostWin&) = delete;
 
+  // Dispatches a synthetic mouse message (WM_MOUSEMOVE / WM_MOUSELEAVE) into
+  // the aura window tree; see NativeWindowViews::FlushForwardedMouseEvent()
+  // for the caller.
+  //
+  // |client_point| is in physical pixels relative to the client area, like the
+  // lParam of a real mouse message. For a WM_MOUSELEAVE, |ui::MouseEvent| takes
+  // the position from the live cursor instead (ui::EventLocationFromMSG).
+  //
+  // The dispatch runs renderer and page code synchronously, so callers must not
+  // touch the window after calling this.
+  void DispatchSyntheticMouseMessage(UINT message,
+                                     const gfx::Point& client_point);
+
  protected:
   // views::DesktopWindowTreeHostWin:
   void OnWidgetInitDone() override;
@@ -40,23 +53,24 @@ class ElectronDesktopWindowTreeHostWin : public views::DesktopWindowTreeHostWin,
                     LRESULT* result) override;
   bool ShouldPaintAsActive() const override;
   bool GetDwmFrameInsetsInPixels(gfx::Insets* insets) const override;
+  bool WidgetSizeIsClientSize() const override;
   bool GetClientAreaInsets(gfx::Insets* insets,
                            int frame_thickness) const override;
   bool HandleMouseEventForCaption(UINT message) const override;
   bool HandleMouseEvent(ui::MouseEvent* event) override;
-  void HandleVisibilityChanged(bool visible) override;
-  void SetAllowScreenshots(bool allow) override;
+  bool HandleIMEMessage(UINT message,
+                        WPARAM w_param,
+                        LPARAM l_param,
+                        LRESULT* result) override;
+  void Restore() override;
 
   // ui::NativeThemeObserver:
   void OnNativeThemeUpdated(ui::NativeTheme* observed_theme) override;
   bool ShouldWindowContentsBeTransparent() const override;
 
  private:
-  void UpdateAllowScreenshots();
-
   raw_ptr<NativeWindowViews> native_window_view_;  // weak ref
   std::optional<bool> force_should_paint_as_active_;
-  bool allow_screenshots_ = true;
   bool widget_init_done_ = false;
 };
 

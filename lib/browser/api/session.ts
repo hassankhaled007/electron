@@ -1,30 +1,11 @@
 import { fetchWithSession } from '@electron/internal/browser/api/net-fetch';
-import { addIpcDispatchListeners } from '@electron/internal/browser/ipc-dispatch';
 import * as deprecate from '@electron/internal/common/deprecate';
 
-import { net } from 'electron/main';
+import { net, type UtilityProcess } from 'electron/main';
 
 const { fromPartition, fromPath, Session } = process._linkedBinding('electron_browser_session');
-const { isDisplayMediaSystemPickerAvailable } = process._linkedBinding('electron_browser_desktop_capturer');
-
-// Fake video window that activates the native system picker
-// This is used to get around the need for a screen/window
-// id in Chrome's desktopCapturer.
-let fakeVideoWindowId = -1;
-// See content/public/browser/desktop_media_id.h
-const kMacOsNativePickerId = -4;
-const systemPickerVideoSource = Object.create(null);
-Object.defineProperty(systemPickerVideoSource, 'id', {
-  get () {
-    return `window:${kMacOsNativePickerId}:${fakeVideoWindowId--}`;
-  }
-});
-systemPickerVideoSource.name = '';
-Object.freeze(systemPickerVideoSource);
 
 Session.prototype._init = function () {
-  addIpcDispatchListeners(this);
-
   if (this.extensions) {
     const rerouteExtensionEvent = (eventName: string) => {
       const warn = deprecate.warnOnce(`${eventName} event`, `session.extensions ${eventName} event`);
@@ -45,18 +26,6 @@ Session.prototype.fetch = function (input: RequestInfo, init?: RequestInit) {
   return fetchWithSession(input, init, this, net.request);
 };
 
-Session.prototype.setDisplayMediaRequestHandler = function (handler, opts) {
-  if (!handler) return this._setDisplayMediaRequestHandler(handler, opts);
-
-  this._setDisplayMediaRequestHandler(async (req, callback) => {
-    if (opts && opts.useSystemPicker && isDisplayMediaSystemPickerAvailable()) {
-      return callback({ video: systemPickerVideoSource });
-    }
-
-    return handler(req, callback);
-  }, opts);
-};
-
 const getPreloadsDeprecated = deprecate.warnOnce('session.getPreloads', 'session.getPreloadScripts');
 Session.prototype.getPreloads = function () {
   getPreloadsDeprecated();
@@ -73,13 +42,18 @@ Session.prototype.setPreloads = function (preloads) {
     .forEach((script) => {
       this.unregisterPreloadScript(script.id);
     });
-  preloads.map(filePath => ({
-    type: 'frame',
-    filePath,
-    _deprecated: true
-  }) as Electron.PreloadScriptRegistration).forEach(script => {
-    this.registerPreloadScript(script);
-  });
+  preloads
+    .map(
+      (filePath) =>
+        ({
+          type: 'frame',
+          filePath,
+          _deprecated: true
+        }) as Electron.PreloadScriptRegistration
+    )
+    .forEach((script) => {
+      this.registerPreloadScript(script);
+    });
 };
 
 Session.prototype.getAllExtensions = deprecate.moveAPI(
@@ -111,10 +85,16 @@ Session.prototype.removeExtension = deprecate.moveAPI(
   'session.extensions.removeExtension'
 );
 
+Session.prototype.registerLocalAIHandler = function (handler: UtilityProcess | null) {
+  // We need to unwrap the userland `ForkUtilityProcess` object and get the underlying
+  // `ElectronInternal.UtilityProcessWrapper` before we call the C++ function
+  return this._registerLocalAIHandler(handler !== null ? (handler as any)._unwrapHandle() : null);
+};
+
 export default {
   fromPartition,
   fromPath,
-  get defaultSession () {
+  get defaultSession() {
     return fromPartition('');
   }
 };

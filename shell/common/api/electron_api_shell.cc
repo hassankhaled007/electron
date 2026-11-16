@@ -4,7 +4,6 @@
 
 #include <string>
 
-#include "shell/common/gin_converters/callback_converter.h"
 #include "shell/common/gin_converters/file_path_converter.h"
 #include "shell/common/gin_converters/guid_converter.h"
 #include "shell/common/gin_converters/gurl_converter.h"
@@ -112,11 +111,20 @@ bool WriteShortcutLink(const base::FilePath& shortcut_path,
                        gin::Arguments* const args) {
   base::win::ShortcutOperation operation =
       base::win::ShortcutOperation::kCreateAlways;
-  args->GetNext(&operation);
-  auto options = gin::Dictionary::CreateEmpty(args->isolate());
-  if (!args->GetNext(&options)) {
-    args->ThrowError();
-    return false;
+  gin::Dictionary options = gin::Dictionary::CreateEmpty(args->isolate());
+
+  v8::Local<v8::Value> peek = args->PeekNext();
+  if (peek->IsObject()) {
+    if (!args->GetNext(&options)) {
+      args->ThrowError();
+      return false;
+    }
+  } else {
+    args->GetNext(&operation);
+    if (!args->GetNext(&options)) {
+      args->ThrowError();
+      return false;
+    }
   }
 
   base::win::ShortcutProperties properties;
@@ -176,14 +184,14 @@ void Initialize(v8::Local<v8::Object> exports,
                 void* priv) {
   v8::Isolate* const isolate = v8::Isolate::GetCurrent();
   gin_helper::Dictionary dict{isolate, exports};
-  dict.SetMethod("showItemInFolder", &platform_util::ShowItemInFolder);
-  dict.SetMethod("openPath", &OpenPath);
-  dict.SetMethod("openExternal", &OpenExternal);
-  dict.SetMethod("trashItem", &TrashItem);
-  dict.SetMethod("beep", &platform_util::Beep);
+  dict.SetMethod<&platform_util::ShowItemInFolder>("showItemInFolder");
+  dict.SetMethod<&OpenPath>("openPath");
+  dict.SetMethod<&OpenExternal>("openExternal");
+  dict.SetMethod<&TrashItem>("trashItem");
+  dict.SetMethod<&platform_util::Beep>("beep");
 #if BUILDFLAG(IS_WIN)
-  dict.SetMethod("writeShortcutLink", &WriteShortcutLink);
-  dict.SetMethod("readShortcutLink", &ReadShortcutLink);
+  dict.SetMethod<&WriteShortcutLink>("writeShortcutLink");
+  dict.SetMethod<&ReadShortcutLink>("readShortcutLink");
 #endif
 }
 

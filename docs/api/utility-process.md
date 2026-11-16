@@ -17,6 +17,16 @@ Process: [Main](../glossary.md#main-process)<br />
   * `env` Object (optional) - Environment key-value pairs. Default is `process.env`.
   * `execArgv` string[] (optional) - List of string arguments passed to the executable.
   * `cwd` string (optional) - Current working directory of the child process.
+  * `session` [Session](session.md) (optional) - Sets the session used by the process for network
+    requests. By default, network requests from the utility process will use the system network
+    context which does not have HTTP cache support. Setting a session enables HTTP caching and
+    other session-specific network features. See [session](session.md) for more information.
+  * `partition` string (optional) - Sets the session used by the process according to the
+    session's partition string. If `partition` starts with `persist:`, the process will use a
+    persistent session available to all pages in the app with the same `partition`. If there is
+    no `persist:` prefix, the process will use an in-memory session. By assigning the same
+    `partition`, multiple processes can share the same session. If the `session` option is set,
+    this option is ignored.
   * `stdio` (string[] | string) (optional) - Allows configuring the mode for `stdout` and `stderr`
     of the child process. Default is `inherit`.
     String value can be one of `pipe`, `ignore`, `inherit`, for more details on these values you can refer to
@@ -36,11 +46,21 @@ Process: [Main](../glossary.md#main-process)<br />
     `com.apple.security.cs.allow-unsigned-executable-memory` entitlements. This will allow the utility process
     to load unsigned libraries. Unless you specifically need this capability, it is best to leave this disabled.
     Default is `false`.
+  * `disclaim` boolean (optional) _macOS_ - With this flag, the utility process will disclaim
+    responsibility for the child process. This causes the operating system to consider the child
+    process as a separate entity for purposes of security policies like Transparency, Consent, and
+    Control (TCC). When responsibility is disclaimed, the parent process will not be attributed
+    for any TCC requests initiated by the child process. This is useful when launching processes
+    that run third-party or otherwise untrusted code. Default is `false`.
   * `respondToAuthRequestsFromMainProcess` boolean (optional) - With this flag, all HTTP 401 and 407 network
     requests created via the [net module](net.md) will allow responding to them via the
-    [`app#login`](app.md#event-login) event in the main process instead of the default
-    [`login`](client-request.md#event-login) event on the [`ClientRequest`](client-request.md) object. Default is
-    `false`.
+    [`login`](#event-login) event on the `UtilityProcess` instance when a `session` is provided, or via
+    the [`app#login`](app.md#event-login) event in the main process when using the default system network
+    context. This flag also routes client-certificate selection to the
+    [`app#select-client-certificate`](app.md#event-select-client-certificate) event in the main process; without
+    it, `net` requests from the utility process proceed without a client certificate. Without this flag, auth
+    challenges are handled by the default [`login`](client-request.md#event-login) event on the
+    [`ClientRequest`](client-request.md) object. Default is `false`.
 
 Returns [`UtilityProcess`](utility-process.md#class-utilityprocess)
 
@@ -83,9 +103,13 @@ process.parentPort.once('message', (e) => {
 
 Returns `boolean`
 
-Terminates the process gracefully. On POSIX, it uses SIGTERM
-but will ensure the process is reaped on exit. This function returns
-true if the kill is successful, and false otherwise.
+Terminates the process gracefully. On POSIX, it sends `SIGTERM`; on Windows,
+it terminates the process. Like Node's
+[`child_process.kill()`](https://nodejs.org/api/child_process.html#subprocesskillsignal),
+this delivers the signal but does not guarantee that the process exits: a
+child that handles `SIGTERM` decides when, or whether, to exit. On POSIX, the child
+is reaped by Electron once it exits. Returns `true` if the signal was delivered,
+and `false` otherwise.
 
 ### Instance Properties
 
@@ -169,6 +193,52 @@ Returns:
 * `message` any
 
 Emitted when the child process sends a message using [`process.parentPort.postMessage()`](process.md#processparentport).
+
+#### Event: 'login'
+
+Returns:
+
+* `event` Event
+* `authenticationResponseDetails` Object
+  * `url` URL
+  * `pid` number
+  * `isRequestForNavigation` boolean - Indicates whether the request is for a navigation.
+  * `firstAuthAttempt` boolean - Indicates whether this is the first authentication attempt.
+  * `responseHeaders` Record\<string, string | string[]\> (optional) - The headers returned in the response.
+* `authInfo` Object
+  * `isProxy` boolean
+  * `scheme` string
+  * `host` string
+  * `port` Integer
+  * `realm` string
+* `callback` Function
+  * `username` string (optional)
+  * `password` string (optional)
+
+Emitted when the utility process encounters an HTTP 401 or 407 authentication challenge, if the
+process was created with both `respondToAuthRequestsFromMainProcess: true` and a `session` option.
+
+The default behavior is to cancel the authentication. To override this you should prevent the
+default behavior with `event.preventDefault()` and call `callback(username, password)` with the
+credentials. Calling `callback` without arguments will cancel the request.
+
+This behaves the same as the [`login` event on `app`](app.md#event-login) but is scoped to the
+individual utility process instance.
+
+```js
+const { session, utilityProcess } = require('electron')
+
+const ses = session.defaultSession
+const child = utilityProcess.fork('./worker.js', [], {
+  session: ses,
+  respondToAuthRequestsFromMainProcess: true
+})
+
+child.on('login', (event, authenticationResponseDetails, authInfo, callback) => {
+  event.preventDefault()
+  callback('username', 'password')
+})
+```
 
 [`child_process.fork`]: https://nodejs.org/dist/latest-v16.x/docs/api/child_process.html#child_processforkmodulepath-args-options
 [Services API]: https://chromium.googlesource.com/chromium/src/+/main/docs/mojo_and_services.md

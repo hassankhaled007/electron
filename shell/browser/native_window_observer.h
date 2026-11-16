@@ -10,13 +10,10 @@
 
 #include "base/observer_list_types.h"
 #include "base/values.h"
-#include "ui/base/window_open_disposition.h"
 
 #if BUILDFLAG(IS_WIN)
 #include <windows.h>
 #endif
-
-class GURL;
 
 namespace gfx {
 class Rect;
@@ -28,15 +25,6 @@ namespace electron {
 class NativeWindowObserver : public base::CheckedObserver {
  public:
   ~NativeWindowObserver() override = default;
-
-  // Called when the web page in window wants to create a popup window.
-  virtual void WillCreatePopupWindow(const std::u16string& frame_name,
-                                     const GURL& target_url,
-                                     const std::string& partition_id,
-                                     WindowOpenDisposition disposition) {}
-
-  // Called when user is starting an navigation in web page.
-  virtual void WillNavigate(bool* prevent_default, const GURL& url) {}
 
   // Called when the window is gonna closed.
   virtual void WillCloseWindow(bool* prevent_default) {}
@@ -94,9 +82,9 @@ class NativeWindowObserver : public base::CheckedObserver {
   virtual void OnWindowLeaveFullScreen() {}
   virtual void OnWindowEnterHtmlFullScreen() {}
   virtual void OnWindowLeaveHtmlFullScreen() {}
-  virtual void OnWindowAlwaysOnTopChanged() {}
+  virtual void OnWindowAlwaysOnTopChanged(bool is_always_on_top) {}
   virtual void OnTouchBarItemResult(const std::string& item_id,
-                                    const base::Value::Dict& details) {}
+                                    const base::DictValue& details) {}
   virtual void OnNewWindowForTab() {}
   virtual void OnSystemContextMenu(int x, int y, bool* prevent_default) {}
 
@@ -110,6 +98,8 @@ class NativeWindowObserver : public base::CheckedObserver {
   virtual void OnExecuteAppCommand(std::string_view command_name) {}
 
   virtual void UpdateWindowControlsOverlay(const gfx::Rect& bounding_rect) {}
+
+  virtual void OnWindowStateRestored() {}
 };
 
 }  // namespace electron

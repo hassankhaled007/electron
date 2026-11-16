@@ -15,21 +15,21 @@
 
 #include "chrome/browser/browser_process.h"
 #include "components/embedder_support/origin_trials/origin_trials_settings_storage.h"
-#include "components/prefs/value_map_pref_store.h"
 #include "printing/buildflags/buildflags.h"
 #include "services/network/public/cpp/network_quality_tracker.h"
 #include "services/network/public/cpp/shared_url_loader_factory.h"
 #include "shell/browser/net/system_network_context_manager.h"
 #include "ui/base/unowned_user_data/unowned_user_data_host.h"
 
-#if BUILDFLAG(IS_LINUX)
-#include "components/os_crypt/sync/key_storage_util_linux.h"
-#endif
-
 class PrefService;
+class ValueMapPrefStore;
 
 namespace printing {
 class PrintJobManager;
+}
+
+namespace metrics {
+class MetricsServiceClient;
 }
 
 namespace electron {
@@ -62,7 +62,6 @@ class BrowserProcessImpl : public BrowserProcess {
   electron::ResolveProxyHelper* GetResolveProxyHelper();
 
 #if BUILDFLAG(IS_LINUX)
-  void SetLinuxStorageBackend(os_crypt::SelectedLinuxBackend selected_backend);
   [[nodiscard]] const std::string& linux_storage_backend() const {
     return selected_linux_storage_backend_;
   }
@@ -71,9 +70,7 @@ class BrowserProcessImpl : public BrowserProcess {
   // BrowserProcess
   BuildState* GetBuildState() override;
   GlobalFeatures* GetFeatures() override;
-  void CreateGlobalFeaturesForTesting() override {}
   void EndSession() override {}
-  void FlushLocalStateAndReply(base::OnceClosure reply) override {}
   bool IsShuttingDown() override;
   ui::UnownedUserDataHost& GetUnownedUserDataHost() override;
   const ui::UnownedUserDataHost& GetUnownedUserDataHost() const override;
@@ -102,7 +99,9 @@ class BrowserProcessImpl : public BrowserProcess {
   printing::PrintPreviewDialogController* print_preview_dialog_controller()
       override;
   printing::BackgroundPrintingManager* background_printing_manager() override;
+  activity_reporter::ActivityReporter* activity_reporter() override;
   IntranetRedirectDetector* intranet_redirect_detector() override;
+  supervised_user::DeviceParentalControls& device_parental_controls() override;
   DownloadStatusUpdater* download_status_updater() override;
   DownloadRequestLimiter* download_request_limiter() override;
   BackgroundModeManager* background_mode_manager() override;
@@ -119,7 +118,13 @@ class BrowserProcessImpl : public BrowserProcess {
   resource_coordinator::TabManager* GetTabManager() override;
   SerialPolicyAllowedPorts* serial_policy_allowed_ports() override;
   HidSystemTrayIcon* hid_system_tray_icon() override;
+  void set_hid_system_tray_icon_for_test(
+      std::unique_ptr<HidSystemTrayIcon> icon) override;
   UsbSystemTrayIcon* usb_system_tray_icon() override;
+  void set_usb_system_tray_icon_for_test(
+      std::unique_ptr<UsbSystemTrayIcon> icon) override;
+  speech::SpeechRecognitionSmallExpertModelInstaller*
+  speech_recognition_small_expert_model_installer() override;
   os_crypt_async::OSCryptAsync* os_crypt_async() override;
   void set_additional_os_crypt_async_provider_for_test(
       size_t precedence,
@@ -143,6 +148,7 @@ class BrowserProcessImpl : public BrowserProcess {
  private:
   void CreateNetworkQualityObserver();
   void CreateOSCryptAsync();
+  void CreateMetricsServiceClient();
   network::NetworkQualityTracker* GetNetworkQualityTracker();
 
 #if BUILDFLAG(ENABLE_PRINTING)
@@ -162,6 +168,9 @@ class BrowserProcessImpl : public BrowserProcess {
   std::unique_ptr<
       network::NetworkQualityTracker::RTTAndThroughputEstimatesObserver>
       network_quality_observer_;
+  std::unique_ptr<supervised_user::DeviceParentalControls>
+      device_parental_controls_;
+  std::unique_ptr<metrics::MetricsServiceClient> metrics_service_client_;
 
   std::unique_ptr<os_crypt_async::OSCryptAsync> os_crypt_async_;
 };

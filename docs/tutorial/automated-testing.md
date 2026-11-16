@@ -16,6 +16,18 @@ From [ChromeDriver - WebDriver for Chrome][chrome-driver]:
 
 There are a few ways that you can set up testing using WebDriver.
 
+:::caution Command-line argument parsing
+ChromeDriver adds its own command-line arguments when it launches Electron, such as
+`--enable-automation` and `--remote-debugging-port=0`. It can also add a positional startup
+URL such as `data:,`. These appear in `process.argv` alongside your application's arguments
+and can cause strict argument parsers, such as `yargs.strict()`, to reject the launch.
+
+Inspect `process.argv` with the driver version and configuration used by your tests.
+In your test startup code, explicitly recognize or filter only the known driver-added
+arguments while keeping validation of your application's arguments. The added arguments
+can vary with the driver version and configuration.
+:::
+
 ### With WebdriverIO
 
 [WebdriverIO](https://webdriver.io/) (WDIO) is a test automation framework that provides a
@@ -42,16 +54,18 @@ After running the configuration wizard, your `wdio.conf.js` should include rough
 export const config = {
   // ...
   services: ['electron'],
-  capabilities: [{
-    browserName: 'electron',
-    'wdio:electronServiceOptions': {
-      // WebdriverIO can automatically find your bundled application
-      // if you use Electron Forge or electron-builder, otherwise you
-      // can define it here, e.g.:
-      // appBinaryPath: './path/to/bundled/application.exe',
-      appArgs: ['foo', 'bar=baz']
+  capabilities: [
+    {
+      browserName: 'electron',
+      'wdio:electronServiceOptions': {
+        // WebdriverIO can automatically find your bundled application
+        // if you use Electron Forge or electron-builder, otherwise you
+        // can define it here, e.g.:
+        // appBinaryPath: './path/to/bundled/application.exe',
+        appArgs: ['foo', 'bar=baz']
+      }
     }
-  }]
+  ]
   // ...
 }
 ```
@@ -193,7 +207,7 @@ Playwright launches your app in development mode through the `_electron.launch` 
 To point this API to your Electron app, you can pass the path to your main process
 entry point (here, it is `main.js`).
 
-```js {5} @ts-nocheck
+```js {4} @ts-nocheck
 import { test, _electron as electron } from '@playwright/test'
 
 test('launch app', async () => {
@@ -203,7 +217,7 @@ test('launch app', async () => {
 })
 ```
 
-After that, you will access to an instance of Playwright's `ElectronApp` class. This
+After that, you will have access to an instance of Playwright's `ElectronApp` class. This
 is a powerful class that has access to main process modules for example:
 
 ```js {5-10} @ts-nocheck
@@ -225,7 +239,7 @@ test('get isPackaged', async () => {
 It can also create individual [Page][playwright-page] objects from Electron BrowserWindow instances.
 For example, to grab the first BrowserWindow and save a screenshot:
 
-```js {6-7} @ts-nocheck
+```js {5-6} @ts-nocheck
 import { test, _electron as electron } from '@playwright/test'
 
 test('save screenshot', async () => {
@@ -237,7 +251,7 @@ test('save screenshot', async () => {
 })
 ```
 
-Putting all this together using the Playwright test-runner, let's create a `example.spec.js`
+Putting all this together using the Playwright test-runner, let's create an `example.spec.js`
 test file with a single test and assertion:
 
 ```js title='example.spec.js' @ts-nocheck
@@ -300,7 +314,9 @@ const electronPath = require('electron')
 const childProcess = require('node:child_process')
 
 // spawn the process
-const env = { /* ... */ }
+const env = {
+  /* ... */
+}
 const stdio = ['inherit', 'inherit', 'inherit', 'ipc']
 const appProcess = childProcess.spawn(electronPath, ['./app'], { stdio, env })
 
@@ -334,7 +350,7 @@ a `TestDriver` class:
 
 ```js title='testDriver.js' @ts-nocheck
 class TestDriver {
-  constructor ({ path, args, env }) {
+  constructor({ path, args, env }) {
     this.rpcCalls = []
 
     // start child process
@@ -362,14 +378,14 @@ class TestDriver {
 
   // simple RPC call
   // to use: driver.rpc('method', 1, 2, 3).then(...)
-  async rpc (cmd, ...args) {
+  async rpc(cmd, ...args) {
     // send rpc request
     const msgId = this.rpcCalls.length
     this.process.send({ msgId, cmd, args })
     return new Promise((resolve, reject) => this.rpcCalls.push({ resolve, reject }))
   }
 
-  stop () {
+  stop() {
     this.process.kill()
   }
 }
@@ -377,11 +393,11 @@ class TestDriver {
 module.exports = { TestDriver }
 ```
 
-In your app code, can then write a simple handler to receive RPC calls:
+In your app code, you can then write a simple handler to receive RPC calls:
 
 ```js title='main.js'
 const METHODS = {
-  isReady () {
+  isReady() {
     // do any setup needed
     return true
   }
@@ -428,10 +444,10 @@ const app = new TestDriver({
     NODE_ENV: 'test'
   }
 })
-test.before(async t => {
+test.before(async (t) => {
   await app.isReady
 })
-test.after.always('cleanup', async t => {
+test.after.always('cleanup', async (t) => {
   await app.stop()
 })
 ```
